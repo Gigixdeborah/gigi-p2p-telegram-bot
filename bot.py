@@ -1,5 +1,16 @@
+<<<<<<< HEAD
 # bot.py — Final GigiP2Bot Script
 import os, json, logging, requests, re
+=======
+# bot.py
+import os
+import json
+# bot.py — Final GigiP2Bot Script
+import os
+import json
+import logging
+import requests
+import re
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -14,10 +25,12 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# TON Connect and app config
 TON_MANIFEST_URL = "https://gigi-ton-connect-v2-deploy.onrender.com/tonconnect-manifest.json"
 TON_CONNECT_LINK = f"https://t.me/wallet/start?startapp=tonconnect-v2&manifestUrl={TON_MANIFEST_URL}"
 TON_RECEIVE_ADDRESS = "UQCMbQomO3XD1FSt7pyfjqj2jBRzyg23myKDtCky_CedKpEH"
 
+# Global storage
 user_wallets = {}
 user_pending_fiat = {}
 user_pending_amount = {}
@@ -26,7 +39,7 @@ user_orders = {}
 FIAT_OPTIONS = ["NGN", "USD", "KES", "GHS", "EUR", "ZAR", "GBP"]
 SUPPORTED_TOKENS = ["TON", "USDT", "ETH", "BTC"]
 
-# Helpers
+# Helper
 def get_inline_keyboard(buttons):
     return InlineKeyboardMarkup([[InlineKeyboardButton(text, callback_data=data) for text, data in row] for row in buttons])
 
@@ -58,7 +71,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def connect_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🔗 TON Wallet", url=TON_CONNECT_LINK)],
-        [InlineKeyboardButton("🥊 MetaMask (EVM)", callback_data="evm_connect")],
+        [InlineKeyboardButton("🦊 MetaMask (EVM)", callback_data="evm_connect")],
         [InlineKeyboardButton("🌈 Phantom (Solana)", callback_data="solana_connect")],
     ]
     await update.message.reply_text("🔐 Choose your wallet to connect:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -90,12 +103,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("💸 Enter the amount and token you'd like to *sell*. Example: `Sell 50 TON`", parse_mode=ParseMode.MARKDOWN)
 
     elif data == "evm_connect":
-        await query.edit_message_text("🥊 Please open MetaMask to connect. Feature coming soon.")
+        await query.edit_message_text("🦊 Please open MetaMask to connect. Feature coming soon.")
 
     elif data == "solana_connect":
         await query.edit_message_text("🌈 Please open Phantom Wallet to connect. Feature coming soon.")
 
-# Message handler for Buy/Sell commands
+# Natural text messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
     user_id = update.message.from_user.id
@@ -125,7 +138,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❓ I didn't understand. Try: `Buy 50 TON` or `Sell 10 USDT`", parse_mode=ParseMode.MARKDOWN)
 
-# Run bot
+# Main
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
