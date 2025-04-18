@@ -1,0 +1,19 @@
+# Ignore Python environment
+venv/
+__pycache__/
+
+# Ignore build artifacts and large files
+*.tgz
+*.zip
+*.pyz
+*.db
+*.png
+*.jpg
+*.jpeg
+
+# Ignore sensitive files
+.env
+
+# Ignore TON build
+ton/
+

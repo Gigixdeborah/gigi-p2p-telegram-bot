@@ -1,0 +1,8 @@
+python-telegram-bot==20.7
+requests
+aiohttp
+nest_asyncio
+Pillow
+qrcode
+web3
+python-dotenv
