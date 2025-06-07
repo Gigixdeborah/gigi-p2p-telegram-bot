@@ -1,42 +1,17 @@
-import os
-import json
-import logging
-from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    CallbackQueryHandler,
-)
-from dotenv import load_dotenv
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import SQLAlchemyError
 from models import User, Transaction, BankAccount, TransactionStatus, Base
 import requests
 import geocoder
 import redis
-import spacy
-import asyncio
 from typing import Optional, Dict, Tuple
+from utils import fetch_fiat_rate, validate_address, fetch_ton_balance
+import random
+import asyncio
+import spacy
 
 # Load spaCy's small English model
 nlp = spacy.load("en_core_web_sm")
 
-# Environment Variables
 load_dotenv()
-REQUIRED_ENV_VARS = [
-    "TELEGRAM_BOT_TOKEN",
-    "DATABASE_URL",
-    "ADMIN_CHAT_ID",
-]
-for var in REQUIRED_ENV_VARS:
-    if not os.getenv(var):
-        raise EnvironmentError(f"Missing required environment variable: {var}")
-
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -64,9 +39,9 @@ FALLBACK_ADDRESSES = {
     "AVAX": os.getenv("FALLBACK_AVAX_ADDRESS", "0x4fb9055c71a3cafd7c6d30686cfe55282a11ac5e"),
     "DOGE": os.getenv("FALLBACK_DOGE_ADDRESS", "DAUpMXucfetrJhzrW9LRFxTo22BzqnVg8E")
 }
+
 FALLBACK_XRP_TAG = os.getenv("FALLBACK_XRP_TAG", "501173063")
 
-# Logging Setup
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -74,34 +49,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Redis and Database Setup
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-engine = create_async_engine(DATABASE_URL, pool_size=10, max_overflow=20)
-AsyncSessionFactory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
+Base.metadata.create_all(engine)
+SessionFactory = sessionmaker(bind=engine)
 
 SUPPORTED_TOKENS = {
     "BTC": "BTC", "ETH": "EVM", "USDT": ["ERC20", "TRC20", "TON"], "TON": "TON",
     "SOL": "Solana", "BNB": "BSC", "MATIC": "Polygon", "USDC": "EVM", "TRX": "TRON",
     "SHIB": "EVM", "XRP": "XRP", "ADA": "Cardano", "DOT": "Polkadot", "AVAX": "Avalanche", "DOGE": "Dogecoin"
 }
+
+# Add lowercase mapping for spaCy token matching
 SUPPORTED_TOKENS_LOWER = {k.lower(): k for k in SUPPORTED_TOKENS.keys()}
 
 conversation_context: Dict[int, Dict] = {}
 
-# Utility Functions
 def escape_markdown(text: str) -> str:
     special_chars = r"\_*[]()~`>#+=|{}.!-"
-    return ''.join(f'\\{c}' if c in special_chars else c for c in str(text))
+    return ''.join(f'\\{c}' if c in special_chars else c for c in text)
 
-async def rate_limit(user_id: int, ip: str = None) -> bool:
+def rate_limit(user_id: int, ip: str = None) -> bool:
     key = f"rate_limit:{user_id}:{ip or 'unknown'}"
     now = datetime.now().timestamp()
-    async with redis_client.pipeline() as pipe:
-        pipe.zremrangebyscore(key, 0, now - 60)
-        pipe.zadd(key, {str(now): now})
-        pipe.zrangebyscore(key, now - 60, now)
-        _, _, requests = await pipe.execute()
-    return len(requests) < 10
+    requests = redis_client.zrangebyscore(key, now - 60, now)
+    if len(requests) >= 10:
+        return False
+    redis_client.zadd(key, {str(now): now})
+    redis_client.zremrangebyscore(key, 0, now - 60)
+    return True
 
 async def detect_fiat_currency() -> str:
     try:
@@ -113,33 +89,29 @@ async def detect_fiat_currency() -> str:
         logger.warning(f"Geolocation failed: {e}")
         return "NGN"
 
-async def init_user(telegram_id: int, db_session: AsyncSession) -> User:
-    async with db_session.begin():
-        try:
-            user = await db_session.get(User, telegram_id)
-            if not user:
-                fiat = await detect_fiat_currency()
-                user = User(telegram_id=telegram_id, fiat_currency=fiat, lang="EN", tone="playful")
-                db_session.add(user)
-                await db_session.commit()
-            return user
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in init_user: {e}")
-            await db_session.rollback()
-            raise
+async def init_user(telegram_id: int, db_session: DBSession) -> User:
+    try:
+        user = db_session.query(User).filter_by(telegram_id=telegram_id).first()
+        if not user:
+            fiat = await detect_fiat_currency()
+            user = User(telegram_id=telegram_id, fiat_currency=fiat, lang="EN", tone="playful")
+            db_session.add(user)
+            db_session.commit()
+        return user
+    except SQLAlchemyError as e:
+        logger.error(f"Database error in init_user: {e}")
+        db_session.rollback()
+        raise
 
 def notify_admin(user_id: int, amount: float, token: str):
     if amount > 100:
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": ADMIN_CHAT_ID, "text": f"⚠️ High-value tx: {user_id} - {amount} {token}"},
-                timeout=5
-            )
-        except Exception as e:
-            logger.error(f"Failed to notify admin: {e}")
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": ADMIN_CHAT_ID, "text": f"⚠️ High-value tx: {user_id} - {amount} {token}"},
+            timeout=5
+        )
 
-# Synonym and Sentiment
+# Synonym Mapping for Intent Detection
 SYNONYMS = {
     "buy": ["purchase", "grab", "get", "want", "need", "acquire", "buying"],
     "sell": ["sell", "cash", "unload", "offload", "trade", "dispose", "selling", "cash out"],
@@ -156,6 +128,7 @@ SYNONYMS = {
     "cancel": ["cancel", "stop", "abort", "nevermind"]
 }
 
+# Sentiment Analysis for Tone Adjustment
 def detect_sentiment(message: str) -> str:
     positive_keywords = ["great", "awesome", "good", "nice", "happy", "love"]
     negative_keywords = ["bad", "terrible", "sad", "sorry", "fail", "hate"]
@@ -166,12 +139,8 @@ def detect_sentiment(message: str) -> str:
         return "negative"
     return "neutral"
 
-# API Calls
+# Fetch Crypto Rates from Bybit API
 async def fetch_crypto_rates_bybit(token: str) -> Optional[float]:
-    cache_key = f"rate:{token}"
-    cached_rate = redis_client.get(cache_key)
-    if cached_rate:
-        return float(cached_rate)
     try:
         symbol = f"{token}USDT"
         response = requests.get(f"{BYBIT_API_URL}/v5/market/tickers", params={"category": "spot", "symbol": symbol}, timeout=5)
@@ -180,47 +149,62 @@ async def fetch_crypto_rates_bybit(token: str) -> Optional[float]:
         if data.get("retCode") != 0:
             logger.error(f"Bybit API error: {data.get('retMsg')}")
             return None
-        rate = float(data["result"]["list"][0]["lastPrice"])
-        redis_client.setex(cache_key, 60, rate)
-        return rate
+        ticker = data["result"]["list"][0]
+        return float(ticker["lastPrice"])
     except Exception as e:
-        logger.error(f"Failed to fetch rate for {token}: {e}")
+        logger.error(f"Failed to fetch rate for {token} from Bybit: {e}")
         return None
 
+# Fetch Recipient Address from Bybit API (or custom endpoint)
 async def fetch_recipient_address(token: str, network: Optional[str] = None) -> Tuple[str, Optional[str]]:
-    key = f"USDT_{network}" if token == "USDT" and network else token
     try:
-        params = {"token": token, "network": network} if token == "USDT" and network else {"token": token}
+        if token == "USDT" and network:
+            params = {"token": token, "network": network}
+            key = f"USDT_{network}"
+        else:
+            params = {"token": token}
+            key = token
         response = requests.get(BYBIT_RECIPIENT_API_URL, params=params, timeout=5)
         response.raise_for_status()
         data = response.json()
         address = data.get("address")
         tag = data.get("tag") if token == "XRP" else None
-        return address or FALLBACK_ADDRESSES.get(key, "default_recipient"), tag or (FALLBACK_XRP_TAG if token == "XRP" else None)
+        if not address:
+            logger.warning(f"No address returned from Bybit API for {token}, using fallback")
+            return FALLBACK_ADDRESSES.get(key, "default_recipient"), FALLBACK_XRP_TAG if token == "XRP" else None
+        return address, tag if token == "XRP" else None
     except Exception as e:
-        logger.error(f"Failed to fetch recipient address for {key}: {e}")
+        logger.error(f"Failed to fetch recipient address for {token} from Bybit: {e}")
+        key = f"USDT_{network}" if token == "USDT" and network else token
         return FALLBACK_ADDRESSES.get(key, "default_recipient"), FALLBACK_XRP_TAG if token == "XRP" else None
 
-# Context Management
+# Context Memory Management
 def update_context(user_id: int, context: Dict) -> None:
     conversation_context[user_id] = context
 
 def get_context(user_id: int) -> Dict:
     return conversation_context.get(user_id, {"state": None, "data": {}, "history": []})
 
+# Async Rate Fetch with Retry
 async def fetch_rate_with_retry(token: str, retries: int = 3) -> Optional[float]:
     for attempt in range(retries):
-        rate = await fetch_crypto_rates_bybit(token)
-        if rate is not None:
-            return rate
-        logger.warning(f"Rate fetch failed for {token}, attempt {attempt + 1}/{retries}")
-        await asyncio.sleep(1)
+        try:
+            rate = await fetch_crypto_rates_bybit(token)
+            if rate is not None:
+                return rate
+        except Exception as e:
+            logger.warning(f"Rate fetch failed for {token}, attempt {attempt + 1}/{retries}: {e}")
+            if attempt == retries - 1:
+                return None
+            await asyncio.sleep(1)
     return None
 
-# Intent and Entity Detection
+# spaCy-based Intent and Entity Detection
 def detect_intent_and_entities(message: str) -> Tuple[str, Dict]:
     doc = nlp(message.lower().strip())
     entities = {"token": None, "amount": None, "network": None}
+
+    # Extract entities using spaCy's NER and dependency parsing
     for token in doc:
         if token.like_num:
             try:
@@ -231,12 +215,17 @@ def detect_intent_and_entities(message: str) -> Tuple[str, Dict]:
             entities["token"] = SUPPORTED_TOKENS_LOWER[token.text]
         if token.text in ["erc20", "trc20", "ton"] and entities.get("token") == "USDT":
             entities["network"] = token.text.upper()
+
+    # Intent detection using spaCy's token matching and synonyms
     for intent, synonyms in SYNONYMS.items():
-        if any(t.text in synonyms for t in doc):
-            return intent, entities
+        for synonym in synonyms:
+            if any(synonym == t.text for t in doc):
+                return intent, entities
+
+    # Fallback intent
     return "conversation", entities
 
-# Conversation Handler
+# Smart Conversation Handler with TWA Integration (Async)
 async def handle_conversation(user_id: int, message: str) -> str:
     context = get_context(user_id)
     state = context.get("state")
@@ -245,8 +234,10 @@ async def handle_conversation(user_id: int, message: str) -> str:
     text = message.strip()
     sentiment = detect_sentiment(text)
 
+    # Time-based greeting adjustment
     hour = datetime.now().hour
     time_greeting = "Good evening" if hour >= 18 else "Good afternoon" if hour >= 12 else "Good morning"
+
     greetings = [f"{time_greeting}, cosmic traveler!", "Hey there, friend!", "Hi, star trader!"]
     thanks_replies = ["You're welcome! 😊", "My pleasure!", "Anytime, buddy!"]
     exit_replies = ["Catch you later!", "Take care!", "See you in the cosmos!"]
@@ -262,12 +253,12 @@ async def handle_conversation(user_id: int, message: str) -> str:
         data["token"] = token
         if token == "USDT":
             keyboard = [
-                [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20_buy"),
-                 InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20_buy")],
-                [InlineKeyboardButton("USDT (TON)", callback_data="network_ton_buy")]
+                [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20"),
+                 InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20")],
+                [InlineKeyboardButton("USDT (TON)", callback_data="network_ton")]
             ]
             update_context(user_id, {"state": "awaiting_network_buy", "data": data, "history": history + ["buy"]})
-            return f"USDT, nice! Which network? {InlineKeyboardMarkup(keyboard)}"
+            return "USDT, nice! Which network? " + InlineKeyboardMarkup(keyboard)
         update_context(user_id, {"state": "awaiting_amount_buy", "data": data, "history": history + ["buy"]})
         return f"Nice pick! How much {token} would you like to buy? (e.g., 1.5)"
 
@@ -285,7 +276,7 @@ async def handle_conversation(user_id: int, message: str) -> str:
             data["amount"] = amount
             rate = await fetch_rate_with_retry(data["token"])
             if not rate:
-                return "Oops, couldn’t fetch the rate for that token! Try another?"
+                return "Oops, couldn’t fetch the rate for that token from Bybit! Try another?"
             fiat_amount = amount * rate + 0.15
             token = data["token"]
             network = data.get("network")
@@ -299,7 +290,7 @@ async def handle_conversation(user_id: int, message: str) -> str:
                 [InlineKeyboardButton("Cancel", callback_data="cancel_action")]
             ]
             tag_text = f" (Tag: {tag})" if tag else ""
-            return f"Buying {amount} {token}{f' ({network})' if network else ''} for ${fiat_amount:.2f} (incl. $0.15 fee). Ready to send to {recipient_address}{tag_text}? {InlineKeyboardMarkup(keyboard)}"
+            return f"Cool! Buying {amount} {token}{f' ({network})' if network else ''} for ${fiat_amount:.2f} (incl. $0.15 fee). Ready to send to {recipient_address}{tag_text}? {InlineKeyboardMarkup(keyboard)}"
         except ValueError:
             return "Oops, that didn’t look like a number! How much would you like to buy?"
 
@@ -314,12 +305,12 @@ async def handle_conversation(user_id: int, message: str) -> str:
         data["token"] = token
         if token == "USDT":
             keyboard = [
-                [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20_sell"),
-                 InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20_sell")],
-                [InlineKeyboardButton("USDT (TON)", callback_data="network_ton_sell")]
+                [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20"),
+                 InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20")],
+                [InlineKeyboardButton("USDT (TON)", callback_data="network_ton")]
             ]
             update_context(user_id, {"state": "awaiting_network_sell", "data": data, "history": history + ["sell"]})
-            return f"USDT, nice! Which network? {InlineKeyboardMarkup(keyboard)}"
+            return "USDT, nice! Which network? " + InlineKeyboardMarkup(keyboard)
         update_context(user_id, {"state": "awaiting_amount_sell", "data": data, "history": history + ["sell"]})
         return f"Great choice! How much {token} are you selling? (e.g., 0.5)"
 
@@ -337,7 +328,7 @@ async def handle_conversation(user_id: int, message: str) -> str:
             data["amount"] = amount
             rate = await fetch_rate_with_retry(data["token"])
             if not rate:
-                return "Oops, couldn’t fetch the rate for that token! Try another?"
+                return "Oops, couldn’t fetch the rate for that token from Bybit! Try another?"
             fiat_amount = amount * rate - 0.15
             token = data["token"]
             network = data.get("network")
@@ -353,7 +344,7 @@ async def handle_conversation(user_id: int, message: str) -> str:
             ]
             tag_text = f" (Tag: {tag})" if tag else ""
             notify_admin(user_id, amount, token)
-            return f"Selling {amount} {token}{f' ({network})' if network else ''} for ${fiat_amount:.2f} (after $0.15 fee). Send to {recipient_address}{tag_text}! {InlineKeyboardMarkup(keyboard)}"
+            return f"Awesome! Selling {amount} {token}{f' ({network})' if network else ''} for ${fiat_amount:.2f} (after $0.15 fee). Send to {recipient_address}{tag_text}! {InlineKeyboardMarkup(keyboard)}"
         except ValueError:
             return "Hmm, that wasn’t a number! How much are you selling?"
 
@@ -361,6 +352,7 @@ async def handle_conversation(user_id: int, message: str) -> str:
         update_context(user_id, {"state": None, "data": {}, "history": history + ["sell_confirmed"]})
         return "Transaction started! Check the web app. I’m here if you need me! 🚀"
 
+    # Intent detection with entity extraction using spaCy
     intent, entities = detect_intent_and_entities(text)
     if intent == "buy":
         token = entities.get("token")
@@ -369,16 +361,16 @@ async def handle_conversation(user_id: int, message: str) -> str:
         if token and amount:
             rate = await fetch_rate_with_retry(token)
             if not rate:
-                return "Oops, couldn’t fetch the rate for that token! Try another?"
+                return "Oops, couldn’t fetch the rate for that token from Bybit! Try another?"
             fiat_amount = amount * rate + 0.15
             if token == "USDT" and not network:
                 keyboard = [
-                    [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20_buy"),
-                     InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20_buy")],
-                    [InlineKeyboardButton("USDT (TON)", callback_data="network_ton_buy")]
+                    [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20"),
+                     InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20")],
+                    [InlineKeyboardButton("USDT (TON)", callback_data="network_ton")]
                 ]
                 update_context(user_id, {"state": "awaiting_network_buy", "data": {"token": token, "amount": amount}, "history": history + ["buy"]})
-                return f"USDT, nice! Which network? {InlineKeyboardMarkup(keyboard)}"
+                return "USDT, nice! Which network? " + InlineKeyboardMarkup(keyboard)
             recipient_address, tag = await fetch_recipient_address(token, network)
             update_context(user_id, {"state": "confirm_buy", "data": {"token": token, "amount": amount, "network": network}, "history": history + ["buy_direct"]})
             url = f"{TWA_BASE_URL}/sign.html?user_id={user_id}&amount={amount}&to={recipient_address}&tid={user_id}"
@@ -389,16 +381,16 @@ async def handle_conversation(user_id: int, message: str) -> str:
                 [InlineKeyboardButton("Cancel", callback_data="cancel_action")]
             ]
             tag_text = f" (Tag: {tag})" if tag else ""
-            return f"Buying {amount} {token}{f' ({network})' if network else ''} for ${fiat_amount:.2f} (incl. $0.15 fee). Ready to send to {recipient_address}{tag_text}? {InlineKeyboardMarkup(keyboard)}"
+            return f"Got it! Buying {amount} {token}{f' ({network})' if network else ''} for ${fiat_amount:.2f} (incl. $0.15 fee). Ready to send to {recipient_address}{tag_text}? {InlineKeyboardMarkup(keyboard)}"
         elif token:
             if token == "USDT":
                 keyboard = [
-                    [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20_buy"),
-                     InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20_buy")],
-                    [InlineKeyboardButton("USDT (TON)", callback_data="network_ton_buy")]
+                    [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20"),
+                     InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20")],
+                    [InlineKeyboardButton("USDT (TON)", callback_data="network_ton")]
                 ]
                 update_context(user_id, {"state": "awaiting_network_buy", "data": {"token": token}, "history": history + ["buy"]})
-                return f"USDT, nice! Which network? {InlineKeyboardMarkup(keyboard)}"
+                return "USDT, nice! Which network? " + InlineKeyboardMarkup(keyboard)
             update_context(user_id, {"state": "awaiting_amount_buy", "data": {"token": token}, "history": history + ["buy"]})
             return f"Nice! How much {token} would you like to buy?"
         else:
@@ -410,7 +402,7 @@ async def handle_conversation(user_id: int, message: str) -> str:
                  InlineKeyboardButton("More Options", callback_data="more_buy")]
             ]
             update_context(user_id, {"state": "awaiting_token_buy", "data": data, "history": history + ["buy"]})
-            return f"Sweet! Pick a token to buy: {InlineKeyboardMarkup(keyboard)}"
+            return "Sweet! Pick a token to buy: " + InlineKeyboardMarkup(keyboard)
 
     elif intent == "sell":
         token = entities.get("token")
@@ -419,16 +411,16 @@ async def handle_conversation(user_id: int, message: str) -> str:
         if token and amount:
             rate = await fetch_rate_with_retry(token)
             if not rate:
-                return "Oops, couldn’t fetch the rate for that token! Try another?"
+                return "Oops, couldn’t fetch the rate for that token from Bybit! Try another?"
             fiat_amount = amount * rate - 0.15
             if token == "USDT" and not network:
                 keyboard = [
-                    [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20_sell"),
-                     InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20_sell")],
-                    [InlineKeyboardButton("USDT (TON)", callback_data="network_ton_sell")]
+                    [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20"),
+                     InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20")],
+                    [InlineKeyboardButton("USDT (TON)", callback_data="network_ton")]
                 ]
                 update_context(user_id, {"state": "awaiting_network_sell", "data": {"token": token, "amount": amount}, "history": history + ["sell"]})
-                return f"USDT, nice! Which network? {InlineKeyboardMarkup(keyboard)}"
+                return "USDT, nice! Which network? " + InlineKeyboardMarkup(keyboard)
             recipient_address, tag = await fetch_recipient_address(token, network)
             update_context(user_id, {"state": "confirm_sell", "data": {"token": token, "amount": amount, "network": network}, "history": history + ["sell_direct"]})
             url_base = "sign" if SUPPORTED_TOKENS.get(token, "TON") == "TON" or (token == "USDT" and network == "TON") else "evm" if SUPPORTED_TOKENS.get(token, "TON") == "EVM" or (token == "USDT" and network == "ERC20") else "solana"
@@ -441,16 +433,16 @@ async def handle_conversation(user_id: int, message: str) -> str:
             ]
             tag_text = f" (Tag: {tag})" if tag else ""
             notify_admin(user_id, amount, token)
-            return f"Selling {amount} {token}{f' ({network})' if network else ''} for ${fiat_amount:.2f} (after $0.15 fee). Send to {recipient_address}{tag_text}! {InlineKeyboardMarkup(keyboard)}"
+            return f"Awesome! Selling {amount} {token}{f' ({network})' if network else ''} for ${fiat_amount:.2f} (after $0.15 fee). Send to {recipient_address}{tag_text}! {InlineKeyboardMarkup(keyboard)}"
         elif token:
             if token == "USDT":
                 keyboard = [
-                    [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20_sell"),
-                     InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20_sell")],
-                    [InlineKeyboardButton("USDT (TON)", callback_data="network_ton_sell")]
+                    [InlineKeyboardButton("USDT (ERC20)", callback_data="network_erc20"),
+                     InlineKeyboardButton("USDT (TRC20)", callback_data="network_trc20")],
+                    [InlineKeyboardButton("USDT (TON)", callback_data="network_ton")]
                 ]
                 update_context(user_id, {"state": "awaiting_network_sell", "data": {"token": token}, "history": history + ["sell"]})
-                return f"USDT, nice! Which network? {InlineKeyboardMarkup(keyboard)}"
+                return "USDT, nice! Which network? " + InlineKeyboardMarkup(keyboard)
             update_context(user_id, {"state": "awaiting_amount_sell", "data": {"token": token}, "history": history + ["sell"]})
             return f"Great! How much {token} are you selling?"
         else:
@@ -462,7 +454,7 @@ async def handle_conversation(user_id: int, message: str) -> str:
                  InlineKeyboardButton("More Options", callback_data="more_sell")]
             ]
             update_context(user_id, {"state": "awaiting_token_sell", "data": data, "history": history + ["sell"]})
-            return f"Got it! Pick a token to sell: {InlineKeyboardMarkup(keyboard)}"
+            return "Got it! Pick a token to sell: " + InlineKeyboardMarkup(keyboard)
 
     elif intent == "connect_wallet":
         keyboard = [
@@ -471,7 +463,7 @@ async def handle_conversation(user_id: int, message: str) -> str:
             [InlineKeyboardButton("Connect Solana", url=f"{TWA_BASE_URL}/solana.html?user_id={user_id}")]
         ]
         update_context(user_id, {"state": None, "data": data, "history": history + ["connect_wallet"]})
-        return f"Let’s connect your wallet! Pick a network: {InlineKeyboardMarkup(keyboard)}"
+        return "Let’s connect your wallet! Pick a network: " + InlineKeyboardMarkup(keyboard)
 
     elif intent == "balance":
         balance = await fetch_ton_balance(user_id)
@@ -483,9 +475,9 @@ async def handle_conversation(user_id: int, message: str) -> str:
         if token:
             rate = await fetch_rate_with_retry(token)
             if not rate:
-                return "Sorry, I couldn’t fetch the price for that token! Try another?"
+                return "Sorry, I couldn’t fetch the price for that token from Bybit! Try another?"
             update_context(user_id, {"state": None, "data": data, "history": history + ["price"]})
-            return f"{token} is at ${rate:.2f} right now! Want a chart?"
+            return f"Oh, {token} is rocking at ${rate:.2f} right now! Want a chart?"
         return "Tell me which token’s price you want to check!"
 
     elif intent == "chart":
@@ -502,11 +494,11 @@ async def handle_conversation(user_id: int, message: str) -> str:
             [InlineKeyboardButton("Balance", callback_data="quick_balance")]
         ]
         update_context(user_id, {"state": None, "data": data, "history": history + ["help"]})
-        return f"I’m here to help! You can buy/sell crypto, check prices, see charts, or connect your wallet. Pick an action: {InlineKeyboardMarkup(keyboard)}"
+        return "I’m here to help! You can buy/sell crypto, check prices, see charts, or connect your wallet. Pick an action: " + InlineKeyboardMarkup(keyboard)
 
     elif intent == "greeting":
         update_context(user_id, {"state": None, "data": data, "history": history + ["greeting"]})
-        return f"{random.choice(greetings)} It’s {datetime.now().strftime('%I:%M %p WAT, %B %d, %Y')}. Ready to dive into crypto?"
+        return random.choice(greetings) + f" It’s {datetime.now().strftime('%I:%M %p WAT, %B %d, %Y')}. Ready to dive into crypto?"
 
     elif intent == "thanks":
         update_context(user_id, {"state": None, "data": data, "history": history + ["thanks"]})
@@ -528,6 +520,7 @@ async def handle_conversation(user_id: int, message: str) -> str:
         update_context(user_id, {"state": None, "data": {}, "history": history + ["cancel"]})
         return "Okay, I’ve canceled that for you! What’s next?"
 
+    # Fallback with proactive suggestions based on history
     past_intents = [h for h in history if h not in ["greeting", "thanks", "exit", "conversation", "cancel"]]
     if past_intents and "sell" in past_intents[-3:] and entities.get("token"):
         update_context(user_id, {"state": "awaiting_amount_sell", "data": {"token": entities["token"]}, "history": history + ["sell"]})
@@ -542,11 +535,11 @@ async def handle_conversation(user_id: int, message: str) -> str:
 
 # Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await rate_limit(update.effective_user.id, update.message.from_user.id):
+    if not rate_limit(update.effective_user.id, update.message.from_user.id):
         await update.message.reply_text(escape_markdown("Whoa, slow down, cosmic traveler! 🌠"), parse_mode="MarkdownV2")
         return
     user_id = update.effective_user.id
-    async with AsyncSessionFactory() as db_session:
+    with SessionFactory() as db_session:
         try:
             user = await init_user(user_id, db_session)
             keyboard = [
@@ -579,12 +572,11 @@ async def tone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     tone = query.data.split("_")[1]
-    async with AsyncSessionFactory() as db_session:
+    with SessionFactory() as db_session:
         try:
-            async with db_session.begin():
-                user = await db_session.get(User, query.from_user.id)
-                user.tone = tone
-                await db_session.commit()
+            user = db_session.query(User).filter_by(telegram_id=query.from_user.id).first()
+            user.tone = tone
+            db_session.commit()
             await query.edit_message_text(
                 escape_markdown(f"🌠 Vibe set to {tone}! How can I help?"),
                 parse_mode="MarkdownV2"
@@ -598,9 +590,10 @@ async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     user_id = query.from_user.id
     action = query.data.split("_")[1]
-    context_data = get_context(user_id)
-    history = context_data.get("history", [])
-    data = context_data.get("data", {})
+    context = get_context(user_id)
+    state = context.get("state")  # Define state here
+    history = context.get("history", [])
+    data = context.get("data", {})
 
     if action == "buy":
         recipient_address, _ = await fetch_recipient_address("TON")
@@ -643,7 +636,7 @@ async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
     elif action.startswith("network_"):
         parts = query.data.split("_")
         network = parts[1].upper()
-        intent = parts[2]
+        intent = parts[2] if len(parts) > 2 else ("buy" if state == "awaiting_network_buy" else "sell")
         data["token"] = "USDT"
         data["network"] = network
         update_context(user_id, {"state": f"awaiting_amount_{intent}", "data": data, "history": history + [f"{intent}_network"]})
@@ -680,7 +673,7 @@ async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await rate_limit(update.effective_user.id, update.message.from_user.id):
+    if not rate_limit(update.effective_user.id, update.message.from_user.id):
         await update.message.reply_text(escape_markdown("🌠 Too fast! Take a breath!"), parse_mode="MarkdownV2")
         return
     user_id = update.effective_user.id
@@ -688,16 +681,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = await handle_conversation(user_id, message)
     await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
 
-async def main():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("set_tone", set_tone))
     app.add_handler(CallbackQueryHandler(tone_callback, pattern="tone_"))
     app.add_handler(CallbackQueryHandler(quick_action_callback, pattern="quick_|cancel_action|more_|network_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
