@@ -409,7 +409,10 @@ async def handle_conversation(user_id: int, message: str) -> str:
             network = data.get("network")
             recipient_address, tag = await fetch_recipient_address(token, network)
             update_context(user_id, {"state": "confirm_buy", "data": data, "history": history + ["buy_amount"]})
-            url = f"{TWA_BASE_URL}/sign.html?user_id={user_id}&amount={amount}&to={recipient_address}&tid={user_id}"
+            url_base = "sign" if SUPPORTED_TOKENS.get(token, "TON") == "TON" or (token == "USDT" and network == "TON") else "evm" if SUPPORTED_TOKENS.get(token, "TON") == "EVM" or (token == "USDT" and network == "ERC20") else "solana"
+            url = f"{TWA_BASE_URL}/{url_base}.html?user_id={user_id}&amount={amount}&to={recipient_address}&token={token}&tid={user_id}"
+            if network:
+                url += f"&network={network}"
             if tag:
                 url += f"&tag={tag}"
             keyboard = [
@@ -499,7 +502,10 @@ async def handle_conversation(user_id: int, message: str) -> str:
                 return f"USDT, nice! Which network? {InlineKeyboardMarkup(keyboard)}"
             recipient_address, tag = await fetch_recipient_address(token, network)
             update_context(user_id, {"state": "confirm_buy", "data": {"token": token, "amount": amount, "network": network}, "history": history + ["buy_direct"]})
-            url = f"{TWA_BASE_URL}/sign.html?user_id={user_id}&amount={amount}&to={recipient_address}&tid={user_id}"
+            url_base = "sign" if SUPPORTED_TOKENS.get(token, "TON") == "TON" or (token == "USDT" and network == "TON") else "evm" if SUPPORTED_TOKENS.get(token, "TON") == "EVM" or (token == "USDT" and network == "ERC20") else "solana"
+            url = f"{TWA_BASE_URL}/{url_base}.html?user_id={user_id}&amount={amount}&to={recipient_address}&token={token}&tid={user_id}"
+            if network:
+                url += f"&network={network}"
             if tag:
                 url += f"&tag={tag}"
             keyboard = [
@@ -522,9 +528,15 @@ async def handle_conversation(user_id: int, message: str) -> str:
         else:
             recipient_address, _ = await fetch_recipient_address("TON")
             keyboard = [
-                [InlineKeyboardButton("Buy TON", url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}"),
+                [InlineKeyboardButton(
+                    "Buy TON",
+                    url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}&token=TON"
+                ),
                  InlineKeyboardButton("Buy USDT", callback_data="quick_buy_usdt")],
-                [InlineKeyboardButton("Buy BTC", url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}"),
+                [InlineKeyboardButton(
+                    "Buy BTC",
+                    url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}&token=BTC"
+                ),
                  InlineKeyboardButton("More Options", callback_data="more_buy")]
             ]
             update_context(user_id, {"state": "awaiting_token_buy", "data": data, "history": history + ["buy"]})
@@ -811,9 +823,15 @@ async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if action == "buy":
         recipient_address, _ = await fetch_recipient_address("TON")
         keyboard = [
-            [InlineKeyboardButton("Buy TON", url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}"),
+            [InlineKeyboardButton(
+                "Buy TON",
+                url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}&token=TON"
+            ),
              InlineKeyboardButton("Buy USDT", callback_data="quick_buy_usdt")],
-            [InlineKeyboardButton("Buy BTC", url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}"),
+            [InlineKeyboardButton(
+                "Buy BTC",
+                url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}&token=BTC"
+            ),
              InlineKeyboardButton("More Options", callback_data="more_buy")]
         ]
         update_context(user_id, {"state": "awaiting_token_buy", "data": {}, "history": history + ["buy"]})
@@ -885,7 +903,17 @@ async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         recipient_address, tag = await fetch_recipient_address(token_to_fetch)
         url_base = "sign" if SUPPORTED_TOKENS.get(token_to_fetch, "TON") == "TON" else "evm" if SUPPORTED_TOKENS.get(token_to_fetch, "TON") == "EVM" else "solana"
         keyboard = [
-            [InlineKeyboardButton(f"{intent.capitalize()} {t}", url=f"{TWA_BASE_URL}/{url_base}.html?user_id={user_id}&to={recipient_address}") for t in list(SUPPORTED_TOKENS.keys())[3:6]],
+            [
+                InlineKeyboardButton(
+                    f"{intent.capitalize()} {t}",
+                    url=(
+                        f"{TWA_BASE_URL}/{url_base}.html?user_id={user_id}&to={recipient_address}&token={t}"
+                        if intent == "buy"
+                        else f"{TWA_BASE_URL}/{url_base}.html?user_id={user_id}&to={recipient_address}"
+                    ),
+                )
+                for t in list(SUPPORTED_TOKENS.keys())[3:6]
+            ],
             [InlineKeyboardButton("Back", callback_data=f"quick_{intent}")]
         ]
         update_context(user_id, {"state": f"awaiting_token_{intent}", "data": {"token": data.get("token")}, "history": history + [intent]})
