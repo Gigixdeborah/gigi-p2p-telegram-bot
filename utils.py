@@ -3,8 +3,29 @@ import asyncio
 from typing import Optional
 import logging
 import base58
+import os
+import json
 
 logger = logging.getLogger(__name__)
+
+# General JSON helpers
+def load_json(path: str, default):
+    """Load JSON data from *path* or return *default* if missing."""
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error for {path}: {e}")
+        return default
+
+
+def save_json(path: str, data) -> None:
+    """Write *data* as JSON to *path*, creating directories if needed."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
 # ✅ Get crypto price from Bybit + fallback to CoinGecko
 async def fetch_crypto_rates(token: str) -> Optional[float]:

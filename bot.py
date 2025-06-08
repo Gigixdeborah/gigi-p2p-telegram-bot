@@ -24,7 +24,7 @@ import spacy
 import asyncio
 import httpx
 from typing import Optional, Dict, Tuple
-from utils import fetch_ton_balance
+from utils import fetch_ton_balance, load_json, save_json
 
 # Load spaCy's small English model
 nlp = spacy.load("en_core_web_sm")
@@ -117,19 +117,54 @@ async def detect_fiat_currency() -> str:
         return "NGN"
 
 async def init_user(telegram_id: int, db_session: AsyncSession) -> User:
-    async with db_session.begin():
-        try:
+    try:
+        async with db_session.begin():
             user = await db_session.get(User, telegram_id)
             if not user:
                 fiat = await detect_fiat_currency()
                 user = User(telegram_id=telegram_id, fiat_currency=fiat, lang="EN", tone="playful")
                 db_session.add(user)
-                await db_session.commit()
-            return user
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in init_user: {e}")
-            await db_session.rollback()
-            raise
+            await db_session.commit()
+
+        # sync JSON store
+        users = load_json("data/users.json", {})
+        users[str(telegram_id)] = {
+            "fiat_currency": user.fiat_currency,
+            "lang": user.lang,
+            "tone": user.tone,
+            "wallets": {
+                "ton_wallet": user.ton_wallet,
+                "evm_wallet": user.evm_wallet,
+                "sol_wallet": user.sol_wallet,
+            },
+        }
+        save_json("data/users.json", users)
+        return user
+    except SQLAlchemyError as e:
+        logger.error(f"Database error in init_user: {e}")
+        await db_session.rollback()
+        # fallback to JSON
+        users = load_json("data/users.json", {})
+        data = users.get(str(telegram_id))
+        if data:
+            return User(
+                telegram_id=telegram_id,
+                fiat_currency=data.get("fiat_currency", "NGN"),
+                lang=data.get("lang", "EN"),
+                tone=data.get("tone", "playful"),
+                ton_wallet=data.get("wallets", {}).get("ton_wallet"),
+                evm_wallet=data.get("wallets", {}).get("evm_wallet"),
+                sol_wallet=data.get("wallets", {}).get("sol_wallet"),
+            )
+        fiat = await detect_fiat_currency()
+        users[str(telegram_id)] = {
+            "fiat_currency": fiat,
+            "lang": "EN",
+            "tone": "playful",
+            "wallets": {},
+        }
+        save_json("data/users.json", users)
+        return User(telegram_id=telegram_id, fiat_currency=fiat, lang="EN", tone="playful")
 
 def notify_admin(user_id: int, amount: float, token: str):
     if amount > 100:
@@ -619,15 +654,31 @@ async def tone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def transactions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    async with AsyncSessionFactory() as db:
-        result = await db.execute(
-            select(Transaction).where(Transaction.user_id == user_id).order_by(Transaction.created_at.desc()).limit(5)
-        )
-        txs = result.scalars().all()
-    if not txs:
+    try:
+        async with AsyncSessionFactory() as db:
+            result = await db.execute(
+                select(Transaction)
+                .where(Transaction.user_id == user_id)
+                .order_by(Transaction.created_at.desc())
+                .limit(5)
+            )
+            txs = result.scalars().all()
+        if txs:
+            lines = [f"{tx.token} {tx.amount} {tx.chain} - {tx.status.value}" for tx in txs]
+            await update.message.reply_text(
+                "🧾 Recent Transactions:\n" + "\n".join(lines)
+            )
+            return
+    except SQLAlchemyError as e:
+        logger.error(f"Transaction fetch failed: {e}")
+
+    # Fallback to JSON
+    tx_data = load_json("data/transactions.json", [])
+    user_txs = [t for t in reversed(tx_data) if str(t.get("user_id")) == str(user_id)][:5]
+    if not user_txs:
         await update.message.reply_text("📭 No recent transactions.")
         return
-    lines = [f"{tx.token} {tx.amount} {tx.chain} - {tx.status.value}" for tx in txs]
+    lines = [f"{t['token']} {t['amount']} {t['chain']} - {t.get('status', 'pending')}" for t in user_txs]
     await update.message.reply_text("🧾 Recent Transactions:\n" + "\n".join(lines))
 
 async def resync_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):

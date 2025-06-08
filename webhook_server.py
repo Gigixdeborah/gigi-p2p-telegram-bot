@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from models import User, Transaction, TransactionStatus
-from utils import validate_address
+from utils import validate_address, load_json, save_json
 import os
 import logging
 import requests
@@ -57,8 +57,28 @@ def connect_webhook():
             return jsonify({"error": "User not found"}), 404
 
         setattr(user, f"{wallet_type.lower()}_wallet", wallet_address)
-        session.commit()
-        logger.info(f"✅ {wallet_type} wallet saved: {wallet_address}")
+        try:
+            session.commit()
+            logger.info(f"✅ {wallet_type} wallet saved: {wallet_address}")
+
+            users = load_json("data/users.json", {})
+            u = users.get(user_id, {
+                "fiat_currency": user.fiat_currency,
+                "lang": user.lang,
+                "tone": user.tone,
+                "wallets": {},
+            })
+            u.setdefault("wallets", {})[f"{wallet_type.lower()}_wallet"] = wallet_address
+            users[user_id] = u
+            save_json("data/users.json", users)
+        except Exception as e:
+            logger.error(f"User wallet DB error: {e}")
+            session.rollback()
+
+            users = load_json("data/users.json", {})
+            u = users.setdefault(user_id, {"fiat_currency": "NGN", "lang": "EN", "tone": "playful", "wallets": {}})
+            u.setdefault("wallets", {})[f"{wallet_type.lower()}_wallet"] = wallet_address
+            save_json("data/users.json", users)
 
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -79,21 +99,34 @@ def ton_webhook():
         logger.error("❌ Missing TON webhook data")
         return jsonify({"error": "Invalid data"}), 400
 
+    record = {
+        "user_id": str(data['user_id']),
+        "tx_hash": data['txHash'],
+        "amount": float(data['amount']),
+        "token": data['token'].upper(),
+        "chain": "TON",
+        "status": TransactionStatus.SIGNED.value,
+    }
+
     with Session() as session:
         try:
             if session.query(Transaction).filter_by(tx_hash=data['txHash']).first():
                 return jsonify({"message": "Already exists"}), 200
 
             tx = Transaction(
-                user_id=str(data['user_id']),
-                tx_hash=data['txHash'],
-                amount=float(data['amount']),
-                token=data['token'].upper(),
-                chain="TON",
+                user_id=record['user_id'],
+                tx_hash=record['tx_hash'],
+                amount=record['amount'],
+                token=record['token'],
+                chain=record['chain'],
                 status=TransactionStatus.SIGNED
             )
             session.add(tx)
             session.commit()
+
+            txs = load_json("data/transactions.json", [])
+            txs.append(record)
+            save_json("data/transactions.json", txs)
 
             logger.info(f"✅ TON Tx signed: {data['txHash']} for {data['user_id']}")
             requests.post(
@@ -108,7 +141,12 @@ def ton_webhook():
         except Exception as e:
             logger.error(f"❌ TON webhook error: {e}")
             session.rollback()
-            return jsonify({"error": "Server error"}), 500
+
+    txs = load_json("data/transactions.json", [])
+    if not any(t.get("tx_hash") == record['tx_hash'] for t in txs):
+        txs.append(record)
+        save_json("data/transactions.json", txs)
+    return jsonify({"message": "TON transaction recorded"}), 200
 
 @app.route('/<chain>-webhook', methods=['POST'])
 @verify_webhook
@@ -118,31 +156,54 @@ def transaction_webhook(chain):
     if not all(k in data for k in required):
         return jsonify({"error": "Missing data"}), 400
 
+    record = {
+        "user_id": str(data['user_id']),
+        "tx_hash": data['txHash'],
+        "amount": float(data['amount']),
+        "token": data['token'].upper(),
+        "chain": chain.upper(),
+        "status": TransactionStatus.SIGNED.value,
+    }
+
     with Session() as session:
-        if session.query(Transaction).filter_by(tx_hash=data['txHash']).first():
-            return jsonify({"message": "Already exists"}), 200
+        try:
+            if session.query(Transaction).filter_by(tx_hash=data['txHash']).first():
+                return jsonify({"message": "Already exists"}), 200
 
-        tx = Transaction(
-            user_id=str(data['user_id']),
-            tx_hash=data['txHash'],
-            amount=float(data['amount']),
-            token=data['token'].upper(),
-            chain=chain.upper(),
-            status=TransactionStatus.SIGNED
-        )
-        session.add(tx)
-        session.commit()
+            tx = Transaction(
+                user_id=record['user_id'],
+                tx_hash=record['tx_hash'],
+                amount=record['amount'],
+                token=record['token'],
+                chain=record['chain'],
+                status=TransactionStatus.SIGNED
+            )
+            session.add(tx)
+            session.commit()
 
-        logger.info(f"✅ {chain} TX logged: {data['txHash']}")
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": data['user_id'],
-                "text": f"🎉 {data['token']} Tx Signed!\nProcessing payout..."
-            },
-            timeout=5
-        )
-        return jsonify({"message": "Transaction recorded"}), 200
+            txs = load_json("data/transactions.json", [])
+            txs.append(record)
+            save_json("data/transactions.json", txs)
+
+            logger.info(f"✅ {chain} TX logged: {data['txHash']}")
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": data['user_id'],
+                    "text": f"🎉 {data['token']} Tx Signed!\nProcessing payout..."
+                },
+                timeout=5
+            )
+            return jsonify({"message": "Transaction recorded"}), 200
+        except Exception as e:
+            logger.error(f"❌ {chain} webhook error: {e}")
+            session.rollback()
+
+    txs = load_json("data/transactions.json", [])
+    if not any(t.get("tx_hash") == record['tx_hash'] for t in txs):
+        txs.append(record)
+        save_json("data/transactions.json", txs)
+    return jsonify({"message": "Transaction recorded"}), 200
 
 @app.route('/generate-signature', methods=['POST'])
 def generate_signature():
