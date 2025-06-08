@@ -1,6 +1,6 @@
 import os
-import httpx
 import re
+from bot import ask_ollama
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
@@ -24,7 +24,7 @@ def main_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔹 Welcome to GigiP2Bot! 🔹\n\nHow can I assist you today?", reply_markup=main_keyboard())
 
-async def chatgpt_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ollama_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text.lower()
     
     # Check if user wants to buy/sell crypto
@@ -42,13 +42,7 @@ async def chatgpt_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                "http://localhost:11434/api/chat",
-                json={"model": "llama3", "messages": [{"role": "user", "content": user_message}]},
-                timeout=20,
-            )
-            ai_text = resp.json().get("message", {}).get("content", "")
+        ai_text = await ask_ollama(user_message)
         await update.message.reply_text(ai_text or "Hmm...")
     except Exception as e:
         await update.message.reply_text("❌ An error occurred while processing your request.")
@@ -73,10 +67,10 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chatgpt_response))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ollama_response))
     app.add_handler(CallbackQueryHandler(button_click))
     
-    print("✅ Bot is running with Supercharged ChatGPT...")
+    print("✅ Bot is running with Ollama...")
     app.run_polling()
 
 if __name__ == "__main__":
