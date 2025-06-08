@@ -11,6 +11,7 @@ class TransactionStatus(enum.Enum):
     SIGNED = "signed"
     PAID = "paid"
     FAILED = "failed"
+    SELL_FAILED = "sell_failed"
 
 # ✅ User model
 class User(Base):
@@ -51,5 +52,7 @@ class Transaction(Base):
     token = Column(String(10), nullable=False)
     chain = Column(String(20), nullable=False)
     status = Column(SAEnum(TransactionStatus), default=TransactionStatus.PENDING)
+    fiat_amount = Column(Float, nullable=True)
+    bybit_order_id = Column(String(100))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

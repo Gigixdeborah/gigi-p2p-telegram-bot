@@ -15,6 +15,8 @@ BYBIT_API_URL = "https://api.bybit.com"
 BYBIT_RECIPIENT_API_URL = os.getenv(
     "BYBIT_RECIPIENT_API_URL", "https://api.bybit.com/custom/recipient"
 )
+BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 TRANSACTIONS_FILE = os.getenv("TRANSACTIONS_FILE", "data/transactions.json")
 
 REQUIRED_ENV_VARS = [
