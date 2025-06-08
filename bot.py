@@ -21,6 +21,9 @@ from config import (
     BYBIT_API_URL,
     BYBIT_RECIPIENT_API_URL,
     TRANSACTIONS_FILE,
+    WEBHOOK_BASE,
+    OLLAMA_HOST,
+    OLLAMA_MODEL,
 )
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
@@ -63,6 +66,28 @@ FALLBACK_ADDRESSES = {
     "DOGE": os.getenv("FALLBACK_DOGE_ADDRESS", "DAUpMXucfetrJhzrW9LRFxTo22BzqnVg8E")
 }
 FALLBACK_XRP_TAG = os.getenv("FALLBACK_XRP_TAG", "501173063")
+
+# Simple translations for a few messages
+LANG_TEXTS = {
+    "start": {
+        "EN": "\ud83c\udf90 Good evening {name}! I\u2019m GigiP2Bot, your crypto guide! Connect a wallet or say \u2018buy TON\u2019! \u2728",
+        "FR": "\ud83c\udf90 Bonsoir {name}! Je suis GigiP2Bot, ton guide crypto! Connecte un wallet ou dis 'acheter TON'! \u2728",
+        "ES": "\ud83c\udf90 \u00a1Buenas noches {name}! Soy GigiP2Bot, tu gu\u00eda cripto! Conecta una wallet o escribe 'comprar TON'! \u2728",
+        "ZH": "\ud83c\udf90 \u665a\u4e0a\u597d {name}\uff01\u6211\u662f GigiP2Bot\uff0c\u4f60\u7684\u52a0\u5bc6\u52a9\u624b\uff01\u8fde\u63a5\u94b1\u5305\u6216\u8f93\u5165\u201c\u8d2d\u4e70 TON\u201d\uff01 \u2728",
+    },
+    "summarize_missing": {
+        "EN": "Please provide some text to summarize.",
+        "FR": "Veuillez fournir du texte \u00e0 r\u00e9sumer.",
+        "ES": "Por favor, proporciona un texto para resumir.",
+        "ZH": "\u8bf7\u63d0\u4f9b\u8981\u6982\u62ec\u7684\u6587\u672c\u3002",
+    },
+    "summarize_error": {
+        "EN": "\u26a0\ufe0f Sorry, I couldn't summarize that right now.",
+        "FR": "\u26a0\ufe0f D\u00e9sol\u00e9, impossible de r\u00e9sumer pour le moment.",
+        "ES": "\u26a0\ufe0f Lo siento, no pude resumir eso ahora mismo.",
+        "ZH": "\u26a0\ufe0f \u62b1\u6b49\uff0c\u6211\u65e0\u6cd5\u7b80\u8981\u6587\u672c\u3002",
+    },
+}
 
 # Logging Setup
 logging.basicConfig(
@@ -211,11 +236,15 @@ def notify_admin(user_id: int, amount: float, token: str):
             logger.error(f"Failed to notify admin: {e}")
 
 async def ask_ollama(prompt: str) -> str:
+    """Query the local Ollama server using configured host and model."""
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                "http://localhost:11434/api/chat",
-                json={"model": "llama3", "messages": [{"role": "user", "content": prompt}]},
+                f"{OLLAMA_HOST.rstrip('/')}/api/chat",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
                 timeout=20,
             )
             data = response.json()
@@ -770,10 +799,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("🌐 Connect EVM", url=f"{TWA_BASE_URL}/evm.html?user_id={user_id}")],
                 [InlineKeyboardButton("☀️ Connect Solana", url=f"{TWA_BASE_URL}/solana.html?user_id={user_id}")]
             ]
+            lang = user.lang
+            start_text = LANG_TEXTS["start"].get(lang, LANG_TEXTS["start"]["EN"]).format(name=update.message.from_user.first_name)
             await update.message.reply_text(
-                escape_markdown(f"🌌 Good evening {update.message.from_user.first_name}! I’m GigiP2Bot, your crypto guide! Connect a wallet or say ‘buy TON’! ✨"),
+                escape_markdown(start_text),
                 reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
         except Exception as e:
             logger.error(f"Start command failed: {e}")
@@ -930,6 +961,31 @@ async def connect_wallet_command(update: Update, context: ContextTypes.DEFAULT_T
     user_id = update.effective_user.id
     response = await handle_conversation(user_id, "connect wallet")
     await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
+async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Summarize the text provided after the command."""
+    user_id = update.effective_user.id
+    async with AsyncSessionFactory() as db:
+        user = await db.get(User, user_id)
+    lang = user.lang if user else "EN"
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text(LANG_TEXTS["summarize_missing"].get(lang, LANG_TEXTS["summarize_missing"]["EN"]))
+        return
+    try:
+        resp = requests.post(
+            f"{WEBHOOK_BASE.rstrip('/')}/summarize",
+            json={"text": text},
+            timeout=15,
+        )
+        summary = resp.json().get("summary")
+    except Exception as e:
+        logger.error(f"Summarize API error: {e}")
+        summary = None
+    if summary:
+        await update.message.reply_text(summary)
+    else:
+        await update.message.reply_text(LANG_TEXTS["summarize_error"].get(lang, LANG_TEXTS["summarize_error"]["EN"]))
 
 async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1096,6 +1152,7 @@ async def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("balance", balance_command))
     app.add_handler(CommandHandler("connect_wallet", connect_wallet_command))
+    app.add_handler(CommandHandler("summarize", summarize_command))
     app.add_handler(CallbackQueryHandler(tone_callback, pattern="tone_"))
     app.add_handler(CallbackQueryHandler(language_callback, pattern="lang_"))
     app.add_handler(CallbackQueryHandler(quick_action_callback, pattern="quick_|cancel_action|more_|network_"))
