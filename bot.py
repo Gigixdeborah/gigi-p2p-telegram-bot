@@ -657,6 +657,30 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("📝 Recent actions: " + " -> ".join(hist[-10:]))
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await rate_limit(update.effective_user.id, update.message.from_user.id):
+        await update.message.reply_text(escape_markdown("Whoa, slow down, cosmic traveler! 🌠"), parse_mode="MarkdownV2")
+        return
+    user_id = update.effective_user.id
+    response = await handle_conversation(user_id, "assist")
+    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await rate_limit(update.effective_user.id, update.message.from_user.id):
+        await update.message.reply_text(escape_markdown("Whoa, slow down, cosmic traveler! 🌠"), parse_mode="MarkdownV2")
+        return
+    user_id = update.effective_user.id
+    response = await handle_conversation(user_id, "funds")
+    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
+async def connect_wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await rate_limit(update.effective_user.id, update.message.from_user.id):
+        await update.message.reply_text(escape_markdown("Whoa, slow down, cosmic traveler! 🌠"), parse_mode="MarkdownV2")
+        return
+    user_id = update.effective_user.id
+    response = await handle_conversation(user_id, "connect wallet")
+    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
 async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -770,6 +794,9 @@ async def main():
     app.add_handler(CommandHandler("transactions", transactions_command))
     app.add_handler(CommandHandler("resync_wallet", resync_wallet))
     app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("balance", balance_command))
+    app.add_handler(CommandHandler("connect_wallet", connect_wallet_command))
     app.add_handler(CallbackQueryHandler(tone_callback, pattern="tone_"))
     app.add_handler(CallbackQueryHandler(quick_action_callback, pattern="quick_|cancel_action|more_|network_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
