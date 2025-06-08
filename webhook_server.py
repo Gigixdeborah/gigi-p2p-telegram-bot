@@ -6,6 +6,7 @@ from utils import validate_address, load_json, save_json
 import os
 import logging
 import requests
+import httpx
 from functools import wraps
 import hmac
 import hashlib
@@ -18,6 +19,8 @@ Session = sessionmaker(bind=engine)
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PAYSTACK_API_KEY = os.getenv("PAYSTACK_API_KEY")
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -34,6 +37,29 @@ def verify_webhook(f):
             return jsonify({"error": "Invalid signature"}), 403
         return f(*args, **kwargs)
     return decorated_function
+
+
+@app.route('/summarize', methods=['POST'])
+async def summarize():
+    data = request.json or {}
+    text = data.get('text', '').strip()
+    if not text:
+        return jsonify({'error': 'No text provided'}), 400
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                OLLAMA_URL,
+                json={
+                    'model': 'llama3',
+                    'messages': [{'role': 'user', 'content': text}]
+                },
+                timeout=20,
+            )
+            msg = resp.json().get('message', {}).get('content')
+            return jsonify({'summary': msg or ''}), 200
+    except Exception as e:
+        logger.error(f"Summarize error: {e}")
+        return jsonify({'error': 'Ollama error'}), 500
 
 @app.route('/connect-webhook', methods=['POST'])
 @verify_webhook
