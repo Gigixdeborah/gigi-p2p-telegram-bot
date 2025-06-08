@@ -1,11 +1,10 @@
-# Gigi Webhook
+# Gigi P2P Telegram Bot
 
-Production-ready webhook server for TON, EVM, and Solana.
+This repository contains the Telegram bot that powers the Gigi P2P platform along with the static wallet signing pages. The webhook API is now hosted in a separate service.
 
-- **webhook_server.py** → main server script
-- **requirements.txt** → dependencies
-- **.env** → environment secrets
-- **sign.html**, **evm.html**, **solana.html** → simple wallet signing UIs
+- **bot.py** – main bot script
+- **requirements.txt** – Python dependencies
+- **sign.html**, **evm.html**, **solana.html** – wallet signing UIs used in Telegram Web Apps
 
 ## Setup
 
@@ -20,7 +19,7 @@ python -m spacy download en_core_web_sm
 
 Copy `.env.example` to `.env` and fill in the values:
 
-```
+```bash
 cp .env.example .env
 ```
 
@@ -30,7 +29,10 @@ Key variables:
 - `DATABASE_URL` – SQLAlchemy connection URL
 - `REDIS_URL` – Redis connection (optional)
 - `WEBHOOK_SECRET` – shared secret for wallet callbacks
+- `WEBHOOK_BASE` – URL of the webhook API server
 - `ADMIN_CHAT_ID` – Telegram user ID for error notifications
+- `OLLAMA_HOST` – Ollama server base URL (default `http://localhost:11434`)
+- `OLLAMA_MODEL` – LLM model name (default `llama3`)
 
 ### Bot Commands
 
@@ -39,21 +41,21 @@ Key variables:
 - `/set_language` – select English, French, Spanish or Chinese
 - `/balance` – check your on-chain balance
 - `/transactions` – view recent transactions
+- `/summarize` – summarize provided text using the LLM
 
-### Systemd Services
+### Systemd Service
 
-`gigibot.service` and `gigiwebhook.service` can be installed to run the bot and webhook on boot:
+`gigibot.service` can be installed to run the bot on boot:
 
 ```bash
 sudo cp gigibot.service /etc/systemd/system/
-sudo cp gigiwebhook.service /etc/systemd/system/
-sudo systemctl enable gigibot.service gigiwebhook.service
-sudo systemctl start gigibot.service gigiwebhook.service
+sudo systemctl enable gigibot.service
+sudo systemctl start gigibot.service
 ```
 
 ### Auto update
 
-`pull_and_restart.sh` pulls the latest code and restarts the services. Add a cron job to run it every 5 minutes:
+`pull_and_restart.sh` pulls the latest code and restarts the service. Add a cron job to run it every 5 minutes:
 
 ```cron
 */5 * * * * /opt/gigi-p2p-telegram-bot/pull_and_restart.sh >> /var/log/gigi_update.log 2>&1
@@ -61,17 +63,10 @@ sudo systemctl start gigibot.service gigiwebhook.service
 
 ### Docker
 
-Build and run the bot and webhook using Docker:
+Build and run the bot using Docker:
 
 ```bash
 docker build -t gigi-bot .
-docker run --env-file .env -p 8000:8000 gigi-bot
+docker run --env-file .env gigi-bot
 ```
-
-### API Endpoints
-
-- `POST /summarize` – JSON `{ "text": "..." }` → `{ "summary": "..." }`
-- `POST /ton-webhook` – transaction log for TON
-- `POST /evm-webhook` – transaction log for EVM chains
-- `POST /solana-webhook` – transaction log for Solana
 

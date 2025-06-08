@@ -11,7 +11,6 @@ class TransactionStatus(enum.Enum):
     SIGNED = "signed"
     PAID = "paid"
     FAILED = "failed"
-    SELL_FAILED = "sell_failed"
 
 # ✅ User model
 class User(Base):
