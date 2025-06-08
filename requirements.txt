@@ -4,7 +4,7 @@ psycopg2-binary==2.9.9
 requests==2.31.0
 python-dotenv==1.0.0
 redis==5.0.1
-openai==1.10.0
+httpx==0.26.0
 textblob==0.18.0
 geocoder==1.38.1
 flask==3.0.0

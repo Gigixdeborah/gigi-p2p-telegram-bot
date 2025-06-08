@@ -1,5 +1,5 @@
 import os
-import openai
+import httpx
 import re
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -8,10 +8,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # Load environment variables
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-# Initialize OpenAI API key
-openai.api_key = OPENAI_API_KEY
 
 def main_keyboard():
     keyboard = [
@@ -46,16 +42,17 @@ async def chatgpt_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "system", "content": "You are a helpful assistant."},
-                      {"role": "user", "content": user_message}]
-        )
-        ai_text = response["choices"][0]["message"]["content"]
-        await update.message.reply_text(ai_text)
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "http://localhost:11434/api/chat",
+                json={"model": "llama3", "messages": [{"role": "user", "content": user_message}]},
+                timeout=20,
+            )
+            ai_text = resp.json().get("message", {}).get("content", "")
+        await update.message.reply_text(ai_text or "Hmm...")
     except Exception as e:
         await update.message.reply_text("❌ An error occurred while processing your request.")
-        print(f"OpenAI API Error: {e}")
+        print(f"Ollama error: {e}")
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
