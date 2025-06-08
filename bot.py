@@ -204,6 +204,61 @@ async def fetch_crypto_rates_bybit(token: str) -> Optional[float]:
         logger.error(f"Failed to fetch rate for {token}: {e}")
         return None
 
+async def fetch_crypto_rates_transak(token: str) -> Optional[float]:
+    """Fetch token price in USD from Transak."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                "https://api.transak.com/api/v2/prices",
+                params={"fiatCurrency": "USD", "cryptoCurrencyCode": token},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            price = (
+                data.get("cryptoPrice")
+                or data.get("data", {}).get("cryptoPrice")
+                or data.get("data", {}).get("price")
+            )
+            return float(price) if price else None
+    except Exception as e:
+        logger.error(f"Transak rate fetch error for {token}: {e}")
+        return None
+
+async def fetch_crypto_rates_ramp(token: str) -> Optional[float]:
+    """Fetch token price in USD from Ramp."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                "https://api.ramp.network/api/exchange/spot-price",
+                params={"asset": token, "fiatCurrency": "USD"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            price = (
+                data.get("price")
+                or data.get("assetExchangeRates", {}).get(token.upper())
+            )
+            return float(price) if price else None
+    except Exception as e:
+        logger.error(f"Ramp rate fetch error for {token}: {e}")
+        return None
+
+async def fetch_crypto_rates_moonpay(token: str) -> Optional[float]:
+    """Fetch token price in USD from MoonPay."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                f"https://api.moonpay.com/v3/currencies/{token.lower()}",
+                params={"apiKey": ""},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            price = data.get("priceUsd") or data.get("data", {}).get("priceUsd")
+            return float(price) if price else None
+    except Exception as e:
+        logger.error(f"MoonPay rate fetch error for {token}: {e}")
+        return None
+
 async def fetch_recipient_address(token: str, network: Optional[str] = None) -> Tuple[str, Optional[str]]:
     key = f"USDT_{network}" if token == "USDT" and network else token
     try:
@@ -226,11 +281,23 @@ def get_context(user_id: int) -> Dict:
     return conversation_context.get(user_id, {"state": None, "data": {}, "history": []})
 
 async def fetch_rate_with_retry(token: str, retries: int = 3) -> Optional[float]:
+    providers = [
+        fetch_crypto_rates_bybit,
+        fetch_crypto_rates_transak,
+        fetch_crypto_rates_ramp,
+        fetch_crypto_rates_moonpay,
+    ]
     for attempt in range(retries):
-        rate = await fetch_crypto_rates_bybit(token)
-        if rate is not None:
-            return rate
-        logger.warning(f"Rate fetch failed for {token}, attempt {attempt + 1}/{retries}")
+        tasks = [p(token) for p in providers]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, (int, float)):
+                return float(res)
+            if isinstance(res, Exception):
+                logger.warning(f"Rate provider error for {token}: {res}")
+        logger.warning(
+            f"Rate fetch failed for {token}, attempt {attempt + 1}/{retries}"
+        )
         await asyncio.sleep(1)
     return None
 
