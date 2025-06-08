@@ -1,6 +1,8 @@
 # Gigi Webhook
 
-Production-ready webhook server for TON, EVM, and Solana.
+## Version 1.0.0 — Production Release
+
+Production-ready Telegram bot and webhook stack for TON, EVM, and Solana.
 
 - **webhook_server.py** → main server script
 - **requirements.txt** → dependencies
@@ -31,6 +33,7 @@ Key variables:
 - `REDIS_URL` – Redis connection (optional)
 - `WEBHOOK_SECRET` – shared secret for wallet callbacks
 - `ADMIN_CHAT_ID` – Telegram user ID for error notifications
+- `ADMIN_TOKEN` – token required for `/generate-signature`
 
 ### Systemd Services
 
@@ -52,12 +55,39 @@ sudo systemctl start gigibot.service gigiwebhook.service
 ```
 
 ### Docker
-
-Build and run the bot and webhook using Docker:
+Build and run the webhook using Docker:
 
 ```bash
-docker build -t gigi-bot .
-docker run --env-file .env -p 8000:8000 gigi-bot
+docker build -t gigi-webhook .
+docker run -p 5000:5000 --env-file .env gigi-webhook
+```
+
+The image is tagged as `gigi-webhook:v1.0.0` for production deployments.
+
+## Bot Setup
+
+Run the Telegram bot with:
+
+```bash
+python bot_main.py
+```
+
+Ensure the `.env` file contains the bot token and database connection string.
+
+## Webhook Flow
+
+1. The HTML signing page posts the signed transaction to `/ton-webhook`, `/evm-webhook`, or `/solana-webhook`.
+2. The Flask server verifies the HMAC signature and saves the record.
+3. The bot notifies the user of payout status.
+
+## Config Example
+
+```
+TELEGRAM_BOT_TOKEN=abc123
+DATABASE_URL=sqlite:///gigi.db
+WEBHOOK_SECRET=secret
+ADMIN_CHAT_ID=12345
+ADMIN_TOKEN=myadmin
 ```
 
 ### API Endpoints

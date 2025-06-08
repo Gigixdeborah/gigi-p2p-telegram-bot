@@ -1,10 +1,25 @@
-import requests
 import asyncio
 from typing import Optional
 import logging
-import base58
 import os
 import json
+
+try:
+    import base58
+    b58decode = base58.b58decode
+except Exception:  # fallback minimal decoder if base58 is unavailable
+    _ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+    def b58decode(value: str) -> bytes:
+        num = 0
+        for char in value:
+            num *= 58
+            if char not in _ALPHABET:
+                raise ValueError("Invalid base58 character")
+            num += _ALPHABET.index(char)
+        return num.to_bytes((num.bit_length() + 7) // 8, "big")
+
+logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +44,7 @@ def save_json(path: str, data) -> None:
 
 # ✅ Get crypto price from Bybit + fallback to CoinGecko
 async def fetch_crypto_rates(token: str) -> Optional[float]:
+    import requests
     apis = [
         f"https://api.bybit.com/v2/public/tickers?symbol={token.upper()}USDT",
         f"https://api.coingecko.com/api/v3/simple/price?ids={token.lower()}&vs_currencies=usd"
@@ -48,6 +64,7 @@ async def fetch_crypto_rates(token: str) -> Optional[float]:
 
 # ✅ Get fiat conversion rate (USD → NGN, etc.)
 async def fetch_fiat_rate(fiat: str) -> float:
+    import requests
     try:
         response = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
         data = response.json()
@@ -58,8 +75,12 @@ async def fetch_fiat_rate(fiat: str) -> float:
 
 # ✅ Check TON wallet balance via Toncenter
 async def fetch_ton_balance(address: str) -> Optional[float]:
+    import requests
     try:
-        response = requests.get(f"https://toncenter.com/api/v2/getAddressBalance?address={address}", timeout=5)
+        response = requests.get(
+            f"https://toncenter.com/api/v2/getAddressBalance?address={address}",
+            timeout=5,
+        )
         data = response.json()
         return float(data["result"]) / 1e9 if "result" in data else None
     except Exception as e:
@@ -78,7 +99,7 @@ def validate_address(address: str, chain: str) -> bool:
         return address.startswith("0x") and len(address) == 42 and all(c in "0123456789abcdefABCDEF" for c in address[2:])
     elif chain == "SOLANA":
         try:
-            decoded = base58.b58decode(address)
+            decoded = b58decode(address)
             return 32 <= len(decoded) <= 44
         except Exception:
             return False
