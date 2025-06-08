@@ -25,12 +25,9 @@ import spacy
 import asyncio
 import httpx
 from typing import Optional, Dict, Tuple
-codex/expose-http-endpoint-for-webhook-updates
 from aiohttp import web
 from contextlib import suppress
-from utils import fetch_ton_balance
 from utils import fetch_ton_balance, load_json, save_json
-main
 
 # Load spaCy's small English model
 nlp = spacy.load("en_core_web_sm")
