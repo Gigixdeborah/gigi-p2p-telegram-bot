@@ -67,27 +67,41 @@ FALLBACK_ADDRESSES = {
 }
 FALLBACK_XRP_TAG = os.getenv("FALLBACK_XRP_TAG", "501173063")
 
-# Simple translations for a few messages
-LANG_TEXTS = {
+# Simple translations for a few messages loaded from JSON so new languages can be added without code changes.
+DEFAULT_LANG_TEXTS = {
     "start": {
-        "EN": "\ud83c\udf90 Good evening {name}! I\u2019m GigiP2Bot, your crypto guide! Connect a wallet or say \u2018buy TON\u2019! \u2728",
+        "EN": "\ud83c\udf90 Good evening {name}! I\u2019m GigiP2Bot, your crypto guide! Connect a wallet or say 'buy TON'! \u2728",
         "FR": "\ud83c\udf90 Bonsoir {name}! Je suis GigiP2Bot, ton guide crypto! Connecte un wallet ou dis 'acheter TON'! \u2728",
         "ES": "\ud83c\udf90 \u00a1Buenas noches {name}! Soy GigiP2Bot, tu gu\u00eda cripto! Conecta una wallet o escribe 'comprar TON'! \u2728",
-        "ZH": "\ud83c\udf90 \u665a\u4e0a\u597d {name}\uff01\u6211\u662f GigiP2Bot\uff0c\u4f60\u7684\u52a0\u5bc6\u52a9\u624b\uff01\u8fde\u63a5\u94b1\u5305\u6216\u8f93\u5165\u201c\u8d2d\u4e70 TON\u201d\uff01 \u2728",
+        "ZH": "\ud83c\udf90 \u665a\u4e0a\u597d {name}!\u6211\u662f GigiP2Bot,\u4f60\u7684\u52a0\u5bc6\u52a9\u624b!\u8fde\u63a5\u94b1\u5305\u6216\u8f93\u5165\u201c\u8d2d\u4e70 TON\u201d! \u2728"
+    },
+    "help": {
+        "EN": "I\u2019m here to help! You can buy or sell crypto, check prices or connect your wallet. Use commands or chat with me!",
+        "FR": "Je suis l\u00e0 pour aider ! Vous pouvez acheter ou vendre des crypto, v\u00e9rifier les prix ou connecter votre wallet. Utilisez les commandes ou discutez avec moi !",
+        "ES": "\u00a1Estoy aqu\u00ed para ayudar! Puedes comprar o vender criptomonedas, comprobar precios o conectar tu cartera. \u00a1Usa los comandos o chatea conmigo!",
+        "ZH": "\u6211\u5728\u8fd9\u91cc\u5e2e\u5fd9\uff01\u4f60\u53ef\u4ee5\u4e70\u5356\u52a0\u5bc6\u8d27\u5e01\uff0c\u67e5\u770b\u4ef7\u683c\u6216\u8fde\u63a5\u94b1\u5305\u3002\u4f7f\u7528\u547d\u4ee4\u6216\u548c\u6211\u804a\u5929\uff01"
+    },
+    "balance": {
+        "EN": "Your TON balance is {balance}.",
+        "FR": "Votre solde TON est de {balance}.",
+        "ES": "Tu saldo TON es {balance}.",
+        "ZH": "\u4f60\u7684 TON \u4f59\u989d\u662f {balance}\u3002"
     },
     "summarize_missing": {
         "EN": "Please provide some text to summarize.",
         "FR": "Veuillez fournir du texte \u00e0 r\u00e9sumer.",
         "ES": "Por favor, proporciona un texto para resumir.",
-        "ZH": "\u8bf7\u63d0\u4f9b\u8981\u6982\u62ec\u7684\u6587\u672c\u3002",
+        "ZH": "\u8bf7\u63d0\u4f9b\u8981\u6982\u62ec\u7684\u6587\u672c\u3002"
     },
     "summarize_error": {
         "EN": "\u26a0\ufe0f Sorry, I couldn't summarize that right now.",
         "FR": "\u26a0\ufe0f D\u00e9sol\u00e9, impossible de r\u00e9sumer pour le moment.",
         "ES": "\u26a0\ufe0f Lo siento, no pude resumir eso ahora mismo.",
-        "ZH": "\u26a0\ufe0f \u62b1\u6b49\uff0c\u6211\u65e0\u6cd5\u7b80\u8981\u6587\u672c\u3002",
-    },
+        "ZH": "\u26a0\ufe0f \u62b1\u6b49\uff0c\u6211\u65e0\u6cd5\u7b80\u8981\u8fd9\u4e2a\u3002"
+    }
 }
+
+LANG_TEXTS = load_json("data/lang_texts.json", DEFAULT_LANG_TEXTS)
 
 # Logging Setup
 logging.basicConfig(
@@ -943,16 +957,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(escape_markdown("Whoa, slow down, cosmic traveler! 🌠"), parse_mode="MarkdownV2")
         return
     user_id = update.effective_user.id
-    response = await handle_conversation(user_id, "assist")
-    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+    async with AsyncSessionFactory() as db:
+        user = await db.get(User, user_id)
+    lang = user.lang if user else "EN"
+    help_text = LANG_TEXTS["help"].get(lang, LANG_TEXTS["help"]["EN"])
+    await update.message.reply_text(escape_markdown(help_text), parse_mode="MarkdownV2")
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await rate_limit(update.effective_user.id, update.message.from_user.id):
         await update.message.reply_text(escape_markdown("Whoa, slow down, cosmic traveler! 🌠"), parse_mode="MarkdownV2")
         return
     user_id = update.effective_user.id
-    response = await handle_conversation(user_id, "funds")
-    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+    async with AsyncSessionFactory() as db:
+        user = await db.get(User, user_id)
+    lang = user.lang if user else "EN"
+    address = user.ton_wallet if user else None
+    balance = await fetch_ton_balance(address) if address else None
+    bal_text = LANG_TEXTS["balance"].get(lang, LANG_TEXTS["balance"]["EN"]).format(balance=balance or '0')
+    await update.message.reply_text(escape_markdown(bal_text), parse_mode="MarkdownV2")
 
 async def connect_wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await rate_limit(update.effective_user.id, update.message.from_user.id):
