@@ -8,3 +8,4 @@ httpx==0.26.0
 textblob==0.18.0
 geocoder==1.38.1
 flask==3.0.0
+spacy

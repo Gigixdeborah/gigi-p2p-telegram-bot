@@ -19,14 +19,17 @@ from models import User, Transaction, BankAccount, TransactionStatus, Base
 from sqlalchemy import select
 import requests
 import geocoder
-import redis
+import redis.asyncio as redis
 import spacy
 import asyncio
 import httpx
 from typing import Optional, Dict, Tuple
+codex/expose-http-endpoint-for-webhook-updates
 from aiohttp import web
 from contextlib import suppress
 from utils import fetch_ton_balance
+from utils import fetch_ton_balance, load_json, save_json
+main
 
 # Load spaCy's small English model
 nlp = spacy.load("en_core_web_sm")
@@ -144,10 +147,9 @@ async def rate_limit(user_id: int, ip: str = None) -> bool:
     key = f"rate_limit:{user_id}:{ip or 'unknown'}"
     now = datetime.now().timestamp()
     async with redis_client.pipeline() as pipe:
-        pipe.zremrangebyscore(key, 0, now - 60)
-        pipe.zadd(key, {str(now): now})
-        pipe.zrangebyscore(key, now - 60, now)
-        _, _, requests = await pipe.execute()
+        await pipe.zremrangebyscore(key, 0, now - 60)
+        await pipe.zadd(key, {str(now): now})
+        requests = await pipe.zrangebyscore(key, now - 60, now)
     return len(requests) < 10
 
 async def detect_fiat_currency() -> str:
@@ -161,19 +163,54 @@ async def detect_fiat_currency() -> str:
         return "NGN"
 
 async def init_user(telegram_id: int, db_session: AsyncSession) -> User:
-    async with db_session.begin():
-        try:
+    try:
+        async with db_session.begin():
             user = await db_session.get(User, telegram_id)
             if not user:
                 fiat = await detect_fiat_currency()
                 user = User(telegram_id=telegram_id, fiat_currency=fiat, lang="EN", tone="playful")
                 db_session.add(user)
-                await db_session.commit()
-            return user
-        except SQLAlchemyError as e:
-            logger.error(f"Database error in init_user: {e}")
-            await db_session.rollback()
-            raise
+            await db_session.commit()
+
+        # sync JSON store
+        users = load_json("data/users.json", {})
+        users[str(telegram_id)] = {
+            "fiat_currency": user.fiat_currency,
+            "lang": user.lang,
+            "tone": user.tone,
+            "wallets": {
+                "ton_wallet": user.ton_wallet,
+                "evm_wallet": user.evm_wallet,
+                "sol_wallet": user.sol_wallet,
+            },
+        }
+        save_json("data/users.json", users)
+        return user
+    except SQLAlchemyError as e:
+        logger.error(f"Database error in init_user: {e}")
+        await db_session.rollback()
+        # fallback to JSON
+        users = load_json("data/users.json", {})
+        data = users.get(str(telegram_id))
+        if data:
+            return User(
+                telegram_id=telegram_id,
+                fiat_currency=data.get("fiat_currency", "NGN"),
+                lang=data.get("lang", "EN"),
+                tone=data.get("tone", "playful"),
+                ton_wallet=data.get("wallets", {}).get("ton_wallet"),
+                evm_wallet=data.get("wallets", {}).get("evm_wallet"),
+                sol_wallet=data.get("wallets", {}).get("sol_wallet"),
+            )
+        fiat = await detect_fiat_currency()
+        users[str(telegram_id)] = {
+            "fiat_currency": fiat,
+            "lang": "EN",
+            "tone": "playful",
+            "wallets": {},
+        }
+        save_json("data/users.json", users)
+        return User(telegram_id=telegram_id, fiat_currency=fiat, lang="EN", tone="playful")
 
 def notify_admin(user_id: int, amount: float, token: str):
     if amount > 100:
@@ -230,7 +267,7 @@ def detect_sentiment(message: str) -> str:
 # API Calls
 async def fetch_crypto_rates_bybit(token: str) -> Optional[float]:
     cache_key = f"rate:{token}"
-    cached_rate = redis_client.get(cache_key)
+    cached_rate = await redis_client.get(cache_key)
     if cached_rate:
         return float(cached_rate)
     try:
@@ -242,10 +279,65 @@ async def fetch_crypto_rates_bybit(token: str) -> Optional[float]:
             logger.error(f"Bybit API error: {data.get('retMsg')}")
             return None
         rate = float(data["result"]["list"][0]["lastPrice"])
-        redis_client.setex(cache_key, 60, rate)
+        await redis_client.setex(cache_key, 60, rate)
         return rate
     except Exception as e:
         logger.error(f"Failed to fetch rate for {token}: {e}")
+        return None
+
+async def fetch_crypto_rates_transak(token: str) -> Optional[float]:
+    """Fetch token price in USD from Transak."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                "https://api.transak.com/api/v2/prices",
+                params={"fiatCurrency": "USD", "cryptoCurrencyCode": token},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            price = (
+                data.get("cryptoPrice")
+                or data.get("data", {}).get("cryptoPrice")
+                or data.get("data", {}).get("price")
+            )
+            return float(price) if price else None
+    except Exception as e:
+        logger.error(f"Transak rate fetch error for {token}: {e}")
+        return None
+
+async def fetch_crypto_rates_ramp(token: str) -> Optional[float]:
+    """Fetch token price in USD from Ramp."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                "https://api.ramp.network/api/exchange/spot-price",
+                params={"asset": token, "fiatCurrency": "USD"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            price = (
+                data.get("price")
+                or data.get("assetExchangeRates", {}).get(token.upper())
+            )
+            return float(price) if price else None
+    except Exception as e:
+        logger.error(f"Ramp rate fetch error for {token}: {e}")
+        return None
+
+async def fetch_crypto_rates_moonpay(token: str) -> Optional[float]:
+    """Fetch token price in USD from MoonPay."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                f"https://api.moonpay.com/v3/currencies/{token.lower()}",
+                params={"apiKey": ""},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            price = data.get("priceUsd") or data.get("data", {}).get("priceUsd")
+            return float(price) if price else None
+    except Exception as e:
+        logger.error(f"MoonPay rate fetch error for {token}: {e}")
         return None
 
 async def fetch_recipient_address(token: str, network: Optional[str] = None) -> Tuple[str, Optional[str]]:
@@ -270,11 +362,23 @@ def get_context(user_id: int) -> Dict:
     return conversation_context.get(user_id, {"state": None, "data": {}, "history": []})
 
 async def fetch_rate_with_retry(token: str, retries: int = 3) -> Optional[float]:
+    providers = [
+        fetch_crypto_rates_bybit,
+        fetch_crypto_rates_transak,
+        fetch_crypto_rates_ramp,
+        fetch_crypto_rates_moonpay,
+    ]
     for attempt in range(retries):
-        rate = await fetch_crypto_rates_bybit(token)
-        if rate is not None:
-            return rate
-        logger.warning(f"Rate fetch failed for {token}, attempt {attempt + 1}/{retries}")
+        tasks = [p(token) for p in providers]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, (int, float)):
+                return float(res)
+            if isinstance(res, Exception):
+                logger.warning(f"Rate provider error for {token}: {res}")
+        logger.warning(
+            f"Rate fetch failed for {token}, attempt {attempt + 1}/{retries}"
+        )
         await asyncio.sleep(1)
     return None
 
@@ -352,7 +456,10 @@ async def handle_conversation(user_id: int, message: str) -> str:
             network = data.get("network")
             recipient_address, tag = await fetch_recipient_address(token, network)
             update_context(user_id, {"state": "confirm_buy", "data": data, "history": history + ["buy_amount"]})
-            url = f"{TWA_BASE_URL}/sign.html?user_id={user_id}&amount={amount}&to={recipient_address}&tid={user_id}"
+            url_base = "sign" if SUPPORTED_TOKENS.get(token, "TON") == "TON" or (token == "USDT" and network == "TON") else "evm" if SUPPORTED_TOKENS.get(token, "TON") == "EVM" or (token == "USDT" and network == "ERC20") else "solana"
+            url = f"{TWA_BASE_URL}/{url_base}.html?user_id={user_id}&amount={amount}&to={recipient_address}&token={token}&tid={user_id}"
+            if network:
+                url += f"&network={network}"
             if tag:
                 url += f"&tag={tag}"
             keyboard = [
@@ -442,7 +549,10 @@ async def handle_conversation(user_id: int, message: str) -> str:
                 return f"USDT, nice! Which network? {InlineKeyboardMarkup(keyboard)}"
             recipient_address, tag = await fetch_recipient_address(token, network)
             update_context(user_id, {"state": "confirm_buy", "data": {"token": token, "amount": amount, "network": network}, "history": history + ["buy_direct"]})
-            url = f"{TWA_BASE_URL}/sign.html?user_id={user_id}&amount={amount}&to={recipient_address}&tid={user_id}"
+            url_base = "sign" if SUPPORTED_TOKENS.get(token, "TON") == "TON" or (token == "USDT" and network == "TON") else "evm" if SUPPORTED_TOKENS.get(token, "TON") == "EVM" or (token == "USDT" and network == "ERC20") else "solana"
+            url = f"{TWA_BASE_URL}/{url_base}.html?user_id={user_id}&amount={amount}&to={recipient_address}&token={token}&tid={user_id}"
+            if network:
+                url += f"&network={network}"
             if tag:
                 url += f"&tag={tag}"
             keyboard = [
@@ -465,9 +575,15 @@ async def handle_conversation(user_id: int, message: str) -> str:
         else:
             recipient_address, _ = await fetch_recipient_address("TON")
             keyboard = [
-                [InlineKeyboardButton("Buy TON", url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}"),
+                [InlineKeyboardButton(
+                    "Buy TON",
+                    url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}&token=TON"
+                ),
                  InlineKeyboardButton("Buy USDT", callback_data="quick_buy_usdt")],
-                [InlineKeyboardButton("Buy BTC", url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}"),
+                [InlineKeyboardButton(
+                    "Buy BTC",
+                    url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}&token=BTC"
+                ),
                  InlineKeyboardButton("More Options", callback_data="more_buy")]
             ]
             update_context(user_id, {"state": "awaiting_token_buy", "data": data, "history": history + ["buy"]})
@@ -663,15 +779,31 @@ async def tone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def transactions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    async with AsyncSessionFactory() as db:
-        result = await db.execute(
-            select(Transaction).where(Transaction.user_id == user_id).order_by(Transaction.created_at.desc()).limit(5)
-        )
-        txs = result.scalars().all()
-    if not txs:
+    try:
+        async with AsyncSessionFactory() as db:
+            result = await db.execute(
+                select(Transaction)
+                .where(Transaction.user_id == user_id)
+                .order_by(Transaction.created_at.desc())
+                .limit(5)
+            )
+            txs = result.scalars().all()
+        if txs:
+            lines = [f"{tx.token} {tx.amount} {tx.chain} - {tx.status.value}" for tx in txs]
+            await update.message.reply_text(
+                "🧾 Recent Transactions:\n" + "\n".join(lines)
+            )
+            return
+    except SQLAlchemyError as e:
+        logger.error(f"Transaction fetch failed: {e}")
+
+    # Fallback to JSON
+    tx_data = load_json("data/transactions.json", [])
+    user_txs = [t for t in reversed(tx_data) if str(t.get("user_id")) == str(user_id)][:5]
+    if not user_txs:
         await update.message.reply_text("📭 No recent transactions.")
         return
-    lines = [f"{tx.token} {tx.amount} {tx.chain} - {tx.status.value}" for tx in txs]
+    lines = [f"{t['token']} {t['amount']} {t['chain']} - {t.get('status', 'pending')}" for t in user_txs]
     await update.message.reply_text("🧾 Recent Transactions:\n" + "\n".join(lines))
 
 async def resync_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -702,6 +834,30 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("📝 Recent actions: " + " -> ".join(hist[-10:]))
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await rate_limit(update.effective_user.id, update.message.from_user.id):
+        await update.message.reply_text(escape_markdown("Whoa, slow down, cosmic traveler! 🌠"), parse_mode="MarkdownV2")
+        return
+    user_id = update.effective_user.id
+    response = await handle_conversation(user_id, "assist")
+    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await rate_limit(update.effective_user.id, update.message.from_user.id):
+        await update.message.reply_text(escape_markdown("Whoa, slow down, cosmic traveler! 🌠"), parse_mode="MarkdownV2")
+        return
+    user_id = update.effective_user.id
+    response = await handle_conversation(user_id, "funds")
+    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
+async def connect_wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await rate_limit(update.effective_user.id, update.message.from_user.id):
+        await update.message.reply_text(escape_markdown("Whoa, slow down, cosmic traveler! 🌠"), parse_mode="MarkdownV2")
+        return
+    user_id = update.effective_user.id
+    response = await handle_conversation(user_id, "connect wallet")
+    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
 async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -714,9 +870,15 @@ async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if action == "buy":
         recipient_address, _ = await fetch_recipient_address("TON")
         keyboard = [
-            [InlineKeyboardButton("Buy TON", url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}"),
+            [InlineKeyboardButton(
+                "Buy TON",
+                url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}&token=TON"
+            ),
              InlineKeyboardButton("Buy USDT", callback_data="quick_buy_usdt")],
-            [InlineKeyboardButton("Buy BTC", url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}"),
+            [InlineKeyboardButton(
+                "Buy BTC",
+                url=f"{TWA_BASE_URL}/sign.html?user_id={user_id}&to={recipient_address}&token=BTC"
+            ),
              InlineKeyboardButton("More Options", callback_data="more_buy")]
         ]
         update_context(user_id, {"state": "awaiting_token_buy", "data": {}, "history": history + ["buy"]})
@@ -788,7 +950,17 @@ async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         recipient_address, tag = await fetch_recipient_address(token_to_fetch)
         url_base = "sign" if SUPPORTED_TOKENS.get(token_to_fetch, "TON") == "TON" else "evm" if SUPPORTED_TOKENS.get(token_to_fetch, "TON") == "EVM" else "solana"
         keyboard = [
-            [InlineKeyboardButton(f"{intent.capitalize()} {t}", url=f"{TWA_BASE_URL}/{url_base}.html?user_id={user_id}&to={recipient_address}") for t in list(SUPPORTED_TOKENS.keys())[3:6]],
+            [
+                InlineKeyboardButton(
+                    f"{intent.capitalize()} {t}",
+                    url=(
+                        f"{TWA_BASE_URL}/{url_base}.html?user_id={user_id}&to={recipient_address}&token={t}"
+                        if intent == "buy"
+                        else f"{TWA_BASE_URL}/{url_base}.html?user_id={user_id}&to={recipient_address}"
+                    ),
+                )
+                for t in list(SUPPORTED_TOKENS.keys())[3:6]
+            ],
             [InlineKeyboardButton("Back", callback_data=f"quick_{intent}")]
         ]
         update_context(user_id, {"state": f"awaiting_token_{intent}", "data": {"token": data.get("token")}, "history": history + [intent]})
@@ -847,6 +1019,9 @@ async def main():
     app.add_handler(CommandHandler("transactions", transactions_command))
     app.add_handler(CommandHandler("resync_wallet", resync_wallet))
     app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("balance", balance_command))
+    app.add_handler(CommandHandler("connect_wallet", connect_wallet_command))
     app.add_handler(CallbackQueryHandler(tone_callback, pattern="tone_"))
     app.add_handler(CallbackQueryHandler(quick_action_callback, pattern="quick_|cancel_action|more_|network_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
