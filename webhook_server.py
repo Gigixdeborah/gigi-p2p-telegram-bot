@@ -160,6 +160,33 @@ def ton_webhook():
             session.add(tx)
             session.commit()
 
+            try:
+                order = place_market_sell(f"{token}USDT", amount)
+                logger.info(f"Bybit sell result: {order}")
+                tx.bybit_order_id = order.get("result", {}).get("orderId")
+                tx.fiat_amount = float(order.get("result", {}).get("cumExecValue", 0))
+                tx.status = TransactionStatus.PAID
+                session.commit()
+                requests.post(
+                    "https://api.paystack.co/transfer",
+                    headers={
+                        "Authorization": f"Bearer {PAYSTACK_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "source": "balance",
+                        "amount": int(tx.fiat_amount * 100),
+                        "recipient": {"type": "nuban"},
+                        "reason": "Payout from GigiP2Bot",
+                    },
+                    timeout=10,
+                )
+            except Exception as e:
+                logger.error(f"Bybit sell failed: {e}")
+                tx.status = TransactionStatus.SELL_FAILED
+                session.commit()
+                return jsonify({"error": "Sell failed"}), 500
+
             txs = load_json("data/transactions.json", [])
             txs.append(record)
             save_json("data/transactions.json", txs)
@@ -223,6 +250,33 @@ def transaction_webhook(chain):
             )
             session.add(tx)
             session.commit()
+
+            try:
+                order = place_market_sell(f"{token}USDT", amount)
+                logger.info(f"Bybit sell result: {order}")
+                tx.bybit_order_id = order.get("result", {}).get("orderId")
+                tx.fiat_amount = float(order.get("result", {}).get("cumExecValue", 0))
+                tx.status = TransactionStatus.PAID
+                session.commit()
+                requests.post(
+                    "https://api.paystack.co/transfer",
+                    headers={
+                        "Authorization": f"Bearer {PAYSTACK_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "source": "balance",
+                        "amount": int(tx.fiat_amount * 100),
+                        "recipient": {"type": "nuban"},
+                        "reason": "Payout from GigiP2Bot",
+                    },
+                    timeout=10,
+                )
+            except Exception as e:
+                logger.error(f"Bybit sell failed: {e}")
+                tx.status = TransactionStatus.SELL_FAILED
+                session.commit()
+                return jsonify({"error": "Sell failed"}), 500
 
             txs = load_json("data/transactions.json", [])
             txs.append(record)
