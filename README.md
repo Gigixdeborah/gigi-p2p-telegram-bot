@@ -16,6 +16,22 @@ pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
+### Environment Variables
+
+Copy `.env.example` to `.env` and fill in the values:
+
+```
+cp .env.example .env
+```
+
+Key variables:
+
+- `TELEGRAM_BOT_TOKEN` – bot token from BotFather
+- `DATABASE_URL` – SQLAlchemy connection URL
+- `REDIS_URL` – Redis connection (optional)
+- `WEBHOOK_SECRET` – shared secret for wallet callbacks
+- `ADMIN_CHAT_ID` – Telegram user ID for error notifications
+
 ### Systemd Services
 
 `gigibot.service` and `gigiwebhook.service` can be installed to run the bot and webhook on boot:
@@ -33,6 +49,15 @@ sudo systemctl start gigibot.service gigiwebhook.service
 
 ```cron
 */5 * * * * /opt/gigi-p2p-telegram-bot/pull_and_restart.sh >> /var/log/gigi_update.log 2>&1
+```
+
+### Docker
+
+Build and run the bot and webhook using Docker:
+
+```bash
+docker build -t gigi-bot .
+docker run --env-file .env -p 8000:8000 gigi-bot
 ```
 
 ### API Endpoints

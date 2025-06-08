@@ -12,12 +12,15 @@ import hmac
 import hashlib
 import json
 
+from config import (
+    DATABASE_URL,
+    WEBHOOK_SECRET,
+    TELEGRAM_BOT_TOKEN,
+)
+
 app = Flask(__name__)
-DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL, pool_size=10)
 Session = sessionmaker(bind=engine)
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PAYSTACK_API_KEY = os.getenv("PAYSTACK_API_KEY")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
@@ -124,12 +127,19 @@ def ton_webhook():
     if not all(k in data for k in required):
         logger.error("❌ Missing TON webhook data")
         return jsonify({"error": "Invalid data"}), 400
+    try:
+        amount = float(data['amount'])
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid amount"}), 400
+    token = data['token'].upper()
+    if not token.isalpha():
+        return jsonify({"error": "Invalid token"}), 400
 
     record = {
         "user_id": str(data['user_id']),
         "tx_hash": data['txHash'],
-        "amount": float(data['amount']),
-        "token": data['token'].upper(),
+        "amount": amount,
+        "token": token,
         "chain": "TON",
         "status": TransactionStatus.SIGNED.value,
     }
@@ -181,12 +191,19 @@ def transaction_webhook(chain):
     required = ['user_id', 'txHash', 'amount', 'token', 'to']
     if not all(k in data for k in required):
         return jsonify({"error": "Missing data"}), 400
+    try:
+        amount = float(data['amount'])
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid amount"}), 400
+    token = data['token'].upper()
+    if not token.isalpha():
+        return jsonify({"error": "Invalid token"}), 400
 
     record = {
         "user_id": str(data['user_id']),
         "tx_hash": data['txHash'],
-        "amount": float(data['amount']),
-        "token": data['token'].upper(),
+        "amount": amount,
+        "token": token,
         "chain": chain.upper(),
         "status": TransactionStatus.SIGNED.value,
     }
@@ -233,9 +250,14 @@ def transaction_webhook(chain):
 
 @app.route('/generate-signature', methods=['POST'])
 def generate_signature():
+    admin_token = os.getenv("ADMIN_TOKEN")
+    if not admin_token or request.headers.get("X-Admin-Token") != admin_token:
+        return jsonify({"error": "Unauthorized"}), 401
     data = request.json
     payload = json.dumps(data, separators=(',', ':'))
-    signature = hmac.new(WEBHOOK_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    signature = hmac.new(
+        WEBHOOK_SECRET.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
     return jsonify({"signature": signature})
 
 @app.route('/paystack-callback', methods=['POST'])

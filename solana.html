@@ -6,6 +6,7 @@
 </head>
 <body>
     <h1>Sign Solana Transaction</h1>
+    <script src="config.js"></script>
     <form id="txForm">
         <input type="hidden" name="chain" value="solana">
         <label>To: <input type="text" name="to" required></label><br>
@@ -16,7 +17,7 @@
     document.getElementById('txForm').onsubmit = async (e) => {
         e.preventDefault();
         const data = Object.fromEntries(new FormData(e.target).entries());
-        const res = await fetch('/solana-webhook', {
+        const res = await fetch(window.GIGI_CONFIG.webhookUrl.replace('ton', 'solana'), {
             method: 'POST',
             headers: {'Content-Type':'application/json'},
             body: JSON.stringify(data)

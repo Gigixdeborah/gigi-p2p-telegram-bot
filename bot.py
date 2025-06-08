@@ -12,7 +12,16 @@ from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
 )
-from dotenv import load_dotenv
+from config import (
+    TELEGRAM_BOT_TOKEN,
+    REDIS_URL,
+    DATABASE_URL,
+    ADMIN_CHAT_ID,
+    TWA_BASE_URL,
+    BYBIT_API_URL,
+    BYBIT_RECIPIENT_API_URL,
+    TRANSACTIONS_FILE,
+)
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
@@ -32,24 +41,7 @@ from utils import fetch_ton_balance, load_json, save_json
 # Load spaCy's small English model
 nlp = spacy.load("en_core_web_sm")
 
-# Environment Variables
-load_dotenv()
-REQUIRED_ENV_VARS = [
-    "TELEGRAM_BOT_TOKEN",
-    "DATABASE_URL",
-    "ADMIN_CHAT_ID",
-]
-for var in REQUIRED_ENV_VARS:
-    if not os.getenv(var):
-        raise EnvironmentError(f"Missing required environment variable: {var}")
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
-TWA_BASE_URL = os.getenv("TWA_BASE_URL", "https://gigi-wallet-signing.onrender.com")
-BYBIT_API_URL = "https://api.bybit.com"
-BYBIT_RECIPIENT_API_URL = os.getenv("BYBIT_RECIPIENT_API_URL", "https://api.bybit.com/custom/recipient")
+# Environment variables loaded in config.py
 
 FALLBACK_ADDRESSES = {
     "TON": os.getenv("FALLBACK_TON_ADDRESS", "UQCMbQomO3XD1FSt7pyfjqj2jBRzyg23myKDtCky_CedKpEH"),
@@ -71,9 +63,6 @@ FALLBACK_ADDRESSES = {
     "DOGE": os.getenv("FALLBACK_DOGE_ADDRESS", "DAUpMXucfetrJhzrW9LRFxTo22BzqnVg8E")
 }
 FALLBACK_XRP_TAG = os.getenv("FALLBACK_XRP_TAG", "501173063")
-
-# File used when DB is unavailable
-TRANSACTIONS_FILE = os.getenv("TRANSACTIONS_FILE", "data/transactions.json")
 
 # Logging Setup
 logging.basicConfig(
@@ -235,6 +224,19 @@ async def ask_ollama(prompt: str) -> str:
         logger.error(f"Ollama error: {e}")
         return "Sorry, I had trouble thinking of a response."
 
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global error handler for the bot."""
+    logger.error("Unhandled exception", exc_info=context.error)
+    if isinstance(update, Update):
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text="⚠️ An internal error occurred."
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify admin: {e}")
+
 # Synonym and Sentiment
 SYNONYMS = {
     "buy": ["purchase", "grab", "get", "want", "need", "acquire", "buying"],
@@ -270,7 +272,11 @@ async def fetch_crypto_rates_bybit(token: str) -> Optional[float]:
         return float(cached_rate)
     try:
         symbol = f"{token}USDT"
-        response = requests.get(f"{BYBIT_API_URL}/v5/market/tickers", params={"category": "spot", "symbol": symbol}, timeout=5)
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(
+                f"{BYBIT_API_URL}/v5/market/tickers",
+                params={"category": "spot", "symbol": symbol},
+            )
         response.raise_for_status()
         data = response.json()
         if data.get("retCode") != 0:
@@ -341,8 +347,13 @@ async def fetch_crypto_rates_moonpay(token: str) -> Optional[float]:
 async def fetch_recipient_address(token: str, network: Optional[str] = None) -> Tuple[str, Optional[str]]:
     key = f"USDT_{network}" if token == "USDT" and network else token
     try:
-        params = {"token": token, "network": network} if token == "USDT" and network else {"token": token}
-        response = requests.get(BYBIT_RECIPIENT_API_URL, params=params, timeout=5)
+        params = (
+            {"token": token, "network": network}
+            if token == "USDT" and network
+            else {"token": token}
+        )
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(BYBIT_RECIPIENT_API_URL, params=params)
         response.raise_for_status()
         data = response.json()
         address = data.get("address")
@@ -1023,6 +1034,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(tone_callback, pattern="tone_"))
     app.add_handler(CallbackQueryHandler(quick_action_callback, pattern="quick_|cancel_action|more_|network_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    app.add_error_handler(error_handler)
     webhook_task = asyncio.create_task(run_webhook_listener())
     try:
         await app.run_polling(allowed_updates=Update.ALL_TYPES)
