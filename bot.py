@@ -24,7 +24,12 @@ import spacy
 import asyncio
 import httpx
 from typing import Optional, Dict, Tuple
+codex/expose-http-endpoint-for-webhook-updates
+from aiohttp import web
+from contextlib import suppress
+from utils import fetch_ton_balance
 from utils import fetch_ton_balance, load_json, save_json
+main
 
 # Load spaCy's small English model
 nlp = spacy.load("en_core_web_sm")
@@ -69,6 +74,9 @@ FALLBACK_ADDRESSES = {
 }
 FALLBACK_XRP_TAG = os.getenv("FALLBACK_XRP_TAG", "501173063")
 
+# File used when DB is unavailable
+TRANSACTIONS_FILE = os.getenv("TRANSACTIONS_FILE", "data/transactions.json")
+
 # Logging Setup
 logging.basicConfig(
     level=logging.INFO,
@@ -90,6 +98,45 @@ SUPPORTED_TOKENS = {
 SUPPORTED_TOKENS_LOWER = {k.lower(): k for k in SUPPORTED_TOKENS.keys()}
 
 conversation_context: Dict[int, Dict] = {}
+
+telegram_app: Optional[Application] = None
+
+
+def load_transactions() -> list:
+    if not os.path.exists(TRANSACTIONS_FILE):
+        return []
+    try:
+        with open(TRANSACTIONS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_transactions(data: list) -> None:
+    os.makedirs(os.path.dirname(TRANSACTIONS_FILE), exist_ok=True)
+    with open(TRANSACTIONS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+async def update_transaction_status_db(tx_hash: str, status: TransactionStatus) -> Optional[int]:
+    async with AsyncSessionFactory() as db:
+        async with db.begin():
+            result = await db.execute(select(Transaction).where(Transaction.tx_hash == tx_hash))
+            tx = result.scalar_one_or_none()
+            if not tx:
+                return None
+            tx.status = status
+            user_id = tx.user_id
+        await db.commit()
+    txs = load_transactions()
+    for t in txs:
+        if t.get("tx_hash") == tx_hash:
+            t["status"] = status.value
+            break
+    else:
+        txs.append({"tx_hash": tx_hash, "status": status.value})
+    save_transactions(txs)
+    return user_id
 
 # Utility Functions
 def escape_markdown(text: str) -> str:
@@ -931,10 +978,42 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = await handle_conversation(user_id, message)
     await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
 
+
+async def webhook_update(request: web.Request) -> web.Response:
+    data = await request.json()
+    tx_hash = data.get("tx_hash") or data.get("txHash")
+    status_str = data.get("status")
+    if not tx_hash or not status_str:
+        return web.json_response({"error": "Invalid payload"}, status=400)
+    try:
+        status = TransactionStatus(status_str.lower())
+    except Exception:
+        return web.json_response({"error": "Unknown status"}, status=400)
+    user_id = await update_transaction_status_db(tx_hash, status)
+    if user_id and telegram_app:
+        text = f"✅ Transaction {tx_hash} {status.value}!"
+        try:
+            await telegram_app.bot.send_message(chat_id=user_id, text=text)
+        except Exception as e:
+            logger.error(f"Failed to send confirmation: {e}")
+    return web.json_response({"message": "ok"})
+
+
+async def run_webhook_listener() -> None:
+    app = web.Application()
+    app.add_routes([web.post('/tx-update', webhook_update)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.getenv('BOT_WEBHOOK_PORT', 8081)))
+    await site.start()
+    await asyncio.Event().wait()
+
 async def main():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    global telegram_app
+    telegram_app = app
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("set_tone", set_tone))
     app.add_handler(CommandHandler("transactions", transactions_command))
@@ -946,7 +1025,13 @@ async def main():
     app.add_handler(CallbackQueryHandler(tone_callback, pattern="tone_"))
     app.add_handler(CallbackQueryHandler(quick_action_callback, pattern="quick_|cancel_action|more_|network_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    webhook_task = asyncio.create_task(run_webhook_listener())
+    try:
+        await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    finally:
+        webhook_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await webhook_task
 
 if __name__ == "__main__":
     asyncio.run(main())
