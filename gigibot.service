@@ -1,0 +1,13 @@
+[Unit]
+Description=Gigi Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/gigi-p2p-telegram-bot
+ExecStart=/usr/bin/python3 /opt/gigi-p2p-telegram-bot/bot.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
