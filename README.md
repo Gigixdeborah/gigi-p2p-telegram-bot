@@ -32,6 +32,14 @@ Key variables:
 - `WEBHOOK_SECRET` – shared secret for wallet callbacks
 - `ADMIN_CHAT_ID` – Telegram user ID for error notifications
 
+### Bot Commands
+
+- `/start` – get started and connect your wallet
+- `/set_tone` – change the bot's reply style
+- `/set_language` – select English, French, Spanish or Chinese
+- `/balance` – check your on-chain balance
+- `/transactions` – view recent transactions
+
 ### Systemd Services
 
 `gigibot.service` and `gigiwebhook.service` can be installed to run the bot and webhook on boot:

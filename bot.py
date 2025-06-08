@@ -344,6 +344,28 @@ async def fetch_crypto_rates_moonpay(token: str) -> Optional[float]:
         logger.error(f"MoonPay rate fetch error for {token}: {e}")
         return None
 
+async def fetch_crypto_rates_bitget(token: str) -> Optional[float]:
+    """Fetch token price in USD from Bitget."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                "https://api.bitget.com/api/spot/v1/market/tickers",
+                params={"symbol": f"{token.upper()}USDT"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") != "00000":
+                return None
+            ticker = next(
+                (t for t in data.get("data", []) if t.get("symbol") == f"{token.upper()}USDT"),
+                None,
+            )
+            if ticker:
+                return float(ticker.get("close"))
+    except Exception as e:
+        logger.error(f"Bitget rate fetch error for {token}: {e}")
+    return None
+
 async def fetch_recipient_address(token: str, network: Optional[str] = None) -> Tuple[str, Optional[str]]:
     key = f"USDT_{network}" if token == "USDT" and network else token
     try:
@@ -376,6 +398,7 @@ async def fetch_rate_with_retry(token: str, retries: int = 3) -> Optional[float]
         fetch_crypto_rates_transak,
         fetch_crypto_rates_ramp,
         fetch_crypto_rates_moonpay,
+        fetch_crypto_rates_bitget,
     ]
     for attempt in range(retries):
         tasks = [p(token) for p in providers]
@@ -756,6 +779,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Start command failed: {e}")
             await update.message.reply_text(escape_markdown("Oops! Cosmic glitch! Try again? 😅"), parse_mode="MarkdownV2")
 
+async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("English", callback_data="lang_EN"),
+         InlineKeyboardButton("Français", callback_data="lang_FR")],
+        [InlineKeyboardButton("Español", callback_data="lang_ES"),
+         InlineKeyboardButton("中文", callback_data="lang_ZH")],
+    ]
+    await update.message.reply_text(
+        escape_markdown("🌐 Choose your language"),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="MarkdownV2",
+    )
+
+async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    lang = query.data.split("_")[1]
+    async with AsyncSessionFactory() as db_session:
+        try:
+            async with db_session.begin():
+                user = await db_session.get(User, query.from_user.id)
+                user.lang = lang
+                await db_session.commit()
+            users = load_json("data/users.json", {})
+            u = users.get(str(query.from_user.id), {})
+            u.setdefault("wallets", {})
+            u["fiat_currency"] = u.get("fiat_currency", "NGN")
+            u["lang"] = lang
+            users[str(query.from_user.id)] = u
+            save_json("data/users.json", users)
+            await query.edit_message_text(
+                escape_markdown(f"✅ Language set to {lang}"),
+                parse_mode="MarkdownV2",
+            )
+        except SQLAlchemyError as e:
+            logger.error(f"Language update failed: {e}")
+            await query.edit_message_text(
+                escape_markdown("❌ Language update failed"),
+                parse_mode="MarkdownV2",
+            )
+
 async def set_tone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("😜 Playful", callback_data="tone_playful")],
@@ -1028,10 +1092,12 @@ async def main():
     app.add_handler(CommandHandler("transactions", transactions_command))
     app.add_handler(CommandHandler("resync_wallet", resync_wallet))
     app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("set_language", set_language))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("balance", balance_command))
     app.add_handler(CommandHandler("connect_wallet", connect_wallet_command))
     app.add_handler(CallbackQueryHandler(tone_callback, pattern="tone_"))
+    app.add_handler(CallbackQueryHandler(language_callback, pattern="lang_"))
     app.add_handler(CallbackQueryHandler(quick_action_callback, pattern="quick_|cancel_action|more_|network_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_error_handler(error_handler)
