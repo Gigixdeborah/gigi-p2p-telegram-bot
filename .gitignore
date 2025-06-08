@@ -17,3 +17,8 @@ __pycache__/
 # Ignore TON build
 ton/
 
+# Ignore runtime JSON data
+users.json
+transactions.json
+data/users.json
+data/transactions.json
