@@ -1,0 +1,13 @@
+[Unit]
+Description=Gigi Webhook Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/gigi-p2p-telegram-bot
+ExecStart=/usr/bin/python3 /opt/gigi-p2p-telegram-bot/webhook_server.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
