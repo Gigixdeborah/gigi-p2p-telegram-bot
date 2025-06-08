@@ -24,6 +24,7 @@ import spacy
 import asyncio
 import httpx
 from typing import Optional, Dict, Tuple
+from utils import fetch_ton_balance
 
 # Load spaCy's small English model
 nlp = spacy.load("en_core_web_sm")
@@ -490,7 +491,12 @@ async def handle_conversation(user_id: int, message: str) -> str:
         return f"Let’s connect your wallet! Pick a network: {InlineKeyboardMarkup(keyboard)}"
 
     elif intent == "balance":
-        balance = await fetch_ton_balance(user_id)
+        async with AsyncSessionFactory() as db:
+            user = await db.get(User, user_id)
+        address = user.ton_wallet if user else None
+        if not address:
+            return "You haven't connected a TON wallet yet. Use /start to link one."
+        balance = await fetch_ton_balance(address)
         update_context(user_id, {"state": None, "data": data, "history": history + ["balance"]})
         return f"Checking your balance… Looks like you have {balance or '0'} TON! Want to trade?"
 
@@ -711,7 +717,16 @@ async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="MarkdownV2"
         )
     elif action == "balance":
-        balance = await fetch_ton_balance(user_id)
+        async with AsyncSessionFactory() as db:
+            user = await db.get(User, user_id)
+        address = user.ton_wallet if user else None
+        if not address:
+            await query.edit_message_text(
+                escape_markdown("You haven't connected a TON wallet yet. Use /start to link one."),
+                parse_mode="MarkdownV2"
+            )
+            return
+        balance = await fetch_ton_balance(address)
         update_context(user_id, {"state": None, "data": {}, "history": history + ["balance"]})
         await query.edit_message_text(
             escape_markdown(f"Checking your balance… Looks like you have {balance or '0'} TON! Want to trade?"),
