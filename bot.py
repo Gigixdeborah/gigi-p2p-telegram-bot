@@ -19,7 +19,7 @@ from models import User, Transaction, BankAccount, TransactionStatus, Base
 from sqlalchemy import select
 import requests
 import geocoder
-import redis
+import redis.asyncio as redis
 import spacy
 import asyncio
 import httpx
@@ -100,10 +100,9 @@ async def rate_limit(user_id: int, ip: str = None) -> bool:
     key = f"rate_limit:{user_id}:{ip or 'unknown'}"
     now = datetime.now().timestamp()
     async with redis_client.pipeline() as pipe:
-        pipe.zremrangebyscore(key, 0, now - 60)
-        pipe.zadd(key, {str(now): now})
-        pipe.zrangebyscore(key, now - 60, now)
-        _, _, requests = await pipe.execute()
+        await pipe.zremrangebyscore(key, 0, now - 60)
+        await pipe.zadd(key, {str(now): now})
+        requests = await pipe.zrangebyscore(key, now - 60, now)
     return len(requests) < 10
 
 async def detect_fiat_currency() -> str:
@@ -186,7 +185,7 @@ def detect_sentiment(message: str) -> str:
 # API Calls
 async def fetch_crypto_rates_bybit(token: str) -> Optional[float]:
     cache_key = f"rate:{token}"
-    cached_rate = redis_client.get(cache_key)
+    cached_rate = await redis_client.get(cache_key)
     if cached_rate:
         return float(cached_rate)
     try:
@@ -198,7 +197,7 @@ async def fetch_crypto_rates_bybit(token: str) -> Optional[float]:
             logger.error(f"Bybit API error: {data.get('retMsg')}")
             return None
         rate = float(data["result"]["list"][0]["lastPrice"])
-        redis_client.setex(cache_key, 60, rate)
+        await redis_client.setex(cache_key, 60, rate)
         return rate
     except Exception as e:
         logger.error(f"Failed to fetch rate for {token}: {e}")
