@@ -1,0 +1,73 @@
+services:
+  - type: web
+    name: gigi-bot
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: |
+      pip install --no-cache-dir -r requirements.txt
+    startCommand: python -m gigi_p2p_telegram_bot.bot
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gigi-db
+          property: connectionString
+      - key: TWA_BASE_URL
+        sync: false
+      - key: WEBHOOK_BASE
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: NOMBA_API_KEY
+        sync: false
+      - key: TRANSAK_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4
+      - key: NOMBA_BASE_URL
+        sync: false
+      - key: TRANSAK_BASE_URL
+        sync: false
+    routes:
+      - type: http
+        source: /
+        target: /
+  - type: web
+    name: gigi-webhook
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: |
+      pip install --no-cache-dir -r requirements.txt
+    startCommand: uvicorn gigi_p2p_telegram_bot.webhook:app --host 0.0.0.0 --port 8000
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gigi-db
+          property: connectionString
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: NOMBA_API_KEY
+        sync: false
+      - key: TRANSAK_API_KEY
+        sync: false
+      - key: NOMBA_BASE_URL
+        sync: false
+      - key: TRANSAK_BASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+    routes:
+      - type: http
+        source: /
+        target: /
+databases:
+  - name: gigi-db
+    plan: free
+    region: oregon
