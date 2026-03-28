@@ -17,7 +17,7 @@
     document.getElementById('txForm').onsubmit = async (e) => {
         e.preventDefault();
         const data = Object.fromEntries(new FormData(e.target).entries());
-        const res = await fetch(window.GIGI_CONFIG.webhookUrl.replace('ton', 'solana'), {
+        const res = await fetch(window.GIGI_CONFIG.solanaWebhookUrl, {
             method: 'POST',
             headers: {'Content-Type':'application/json'},
             body: JSON.stringify(data)

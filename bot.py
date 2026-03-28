@@ -16,6 +16,7 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     REDIS_URL,
     DATABASE_URL,
+    ASYNC_DATABASE_URL,
     ADMIN_CHAT_ID,
     TWA_BASE_URL,
     BYBIT_API_URL,
@@ -24,6 +25,7 @@ from config import (
     WEBHOOK_BASE,
     OLLAMA_HOST,
     OLLAMA_MODEL,
+    validate_required_env,
 )
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
@@ -114,7 +116,8 @@ logger = logging.getLogger(__name__)
 
 # Redis and Database Setup
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-engine = create_async_engine(DATABASE_URL, pool_size=10, max_overflow=20)
+engine = create_async_engine(ASYNC_DATABASE_URL,
+    ASYNC_DATABASE_URL, pool_size=10, max_overflow=20)
 AsyncSessionFactory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 SUPPORTED_TOKENS = {
@@ -1011,8 +1014,11 @@ async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(LANG_TEXTS["summarize_missing"].get(lang, LANG_TEXTS["summarize_missing"]["EN"]))
         return
     try:
+        webhook_base = WEBHOOK_BASE.rstrip("/")
+        if not webhook_base.startswith("http"):
+            webhook_base = f"https://{webhook_base}"
         resp = requests.post(
-            f"{WEBHOOK_BASE.rstrip('/')}/summarize",
+            f"{webhook_base}/summarize",
             json={"text": text},
             timeout=15,
         )
@@ -1024,6 +1030,167 @@ async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(summary)
     else:
         await update.message.reply_text(LANG_TEXTS["summarize_error"].get(lang, LANG_TEXTS["summarize_error"]["EN"]))
+
+
+
+def _is_admin(user_id: int) -> bool:
+    return str(user_id) == str(ADMIN_CHAT_ID)
+
+
+async def kyc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with AsyncSessionFactory() as db:
+        user = await db.get(User, update.effective_user.id)
+        if user:
+            user.kyc_status = "pending"
+            await db.commit()
+    await update.message.reply_text("KYC started. Complete verification in your provider flow.")
+
+
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    response, keyboard = await handle_conversation(update.effective_user.id, "buy")
+    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2", reply_markup=keyboard)
+
+
+async def sell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    response, keyboard = await handle_conversation(update.effective_user.id, "sell")
+    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2", reply_markup=keyboard)
+
+
+async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /order <id>")
+        return
+    order_id = context.args[0]
+    async with AsyncSessionFactory() as db:
+        result = await db.execute(select(Transaction).where(Transaction.id == int(order_id), Transaction.user_id == update.effective_user.id))
+        tx = result.scalar_one_or_none()
+    if not tx:
+        await update.message.reply_text("Order not found.")
+        return
+    await update.message.reply_text(f"Order {tx.id}: {tx.status.value} {tx.amount} {tx.token} ({tx.chain})")
+
+
+async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await transactions_command(update, context)
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /cancel <id>")
+        return
+    async with AsyncSessionFactory() as db:
+        result = await db.execute(select(Transaction).where(Transaction.id == int(context.args[0]), Transaction.user_id == update.effective_user.id))
+        tx = result.scalar_one_or_none()
+        if not tx:
+            await update.message.reply_text("Order not found")
+            return
+        if tx.status in (TransactionStatus.COMPLETED, TransactionStatus.CANCELLED):
+            await update.message.reply_text("Order cannot be cancelled")
+            return
+        tx.status = TransactionStatus.CANCELLED
+        await db.commit()
+    await update.message.reply_text("Order cancelled.")
+
+
+async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await resync_wallet(update, context)
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Service online. Use /health on webhook service for probe status.")
+
+
+async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    token = (context.args[0] if context.args else "TON").upper()
+    price = await fetch_rate_with_retry(token)
+    if price is None:
+        await update.message.reply_text(f"Could not fetch {token} price.")
+        return
+    await update.message.reply_text(f"{token} price: ${price}")
+
+
+async def rates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Use /price <token> for token rates. Fiat rates are provider-dependent.")
+
+
+async def fees_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Fees depend on Nomba/Transak quote response and network gas.")
+
+
+async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Support: contact admin or your configured support channel.")
+
+
+async def admin_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("Unauthorized")
+        return
+    async with AsyncSessionFactory() as db:
+        result = await db.execute(select(Transaction).order_by(Transaction.created_at.desc()).limit(20))
+        txs = result.scalars().all()
+    msg = "\n".join([f"#{t.id} {t.user_id} {t.status.value} {t.amount} {t.token}" for t in txs]) if txs else "No orders"
+    await update.message.reply_text(msg)
+
+
+async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("Unauthorized")
+        return
+    async with AsyncSessionFactory() as db:
+        result = await db.execute(select(User).order_by(User.created_at.desc()).limit(20))
+        users = result.scalars().all()
+    await update.message.reply_text(f"Users: {len(users)} shown")
+
+
+async def admin_retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("Unauthorized")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /admin_retry <order_id>")
+        return
+    async with AsyncSessionFactory() as db:
+        tx = await db.get(Transaction, int(context.args[0]))
+        if not tx:
+            await update.message.reply_text("Order not found")
+            return
+        tx.status = TransactionStatus.EXECUTING
+        await db.commit()
+    await update.message.reply_text("Retry requested")
+
+
+async def admin_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("Unauthorized")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /admin_cancel <order_id>")
+        return
+    async with AsyncSessionFactory() as db:
+        tx = await db.get(Transaction, int(context.args[0]))
+        if not tx:
+            await update.message.reply_text("Order not found")
+            return
+        tx.status = TransactionStatus.CANCELLED
+        await db.commit()
+    await update.message.reply_text("Admin cancelled order")
+
+
+async def admin_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("Unauthorized")
+        return
+    await update.message.reply_text("Log aggregation should be done from Render logs.")
+
+
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("Unauthorized")
+        return
+    async with AsyncSessionFactory() as db:
+        user_count = len((await db.execute(select(User.id))).all())
+        tx_count = len((await db.execute(select(Transaction.id))).all())
+    await update.message.reply_text(f"users={user_count}, orders={tx_count}")
 
 async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1136,6 +1303,32 @@ async def quick_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="MarkdownV2"
         )
 
+
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("Unauthorized")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /admin <orders|users|retry|cancel|logs|stats> [order_id]")
+        return
+    sub = context.args[0].lower()
+    context.args = context.args[1:]
+    if sub == "orders":
+        await admin_orders_command(update, context)
+    elif sub == "users":
+        await admin_users_command(update, context)
+    elif sub == "retry":
+        await admin_retry_command(update, context)
+    elif sub == "cancel":
+        await admin_cancel_command(update, context)
+    elif sub == "logs":
+        await admin_logs_command(update, context)
+    elif sub == "stats":
+        await admin_stats_command(update, context)
+    else:
+        await update.message.reply_text("Unknown admin subcommand")
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await rate_limit(update.effective_user.id, update.message.from_user.id):
         await update.message.reply_text(escape_markdown("🌠 Too fast! Take a breath!"), parse_mode="MarkdownV2")
@@ -1180,19 +1373,39 @@ async def run_webhook_listener() -> None:
     await asyncio.Event().wait()
 
 async def main():
+    validate_required_env("bot")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     global telegram_app
     telegram_app = app
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("kyc", kyc_command))
+    app.add_handler(CommandHandler("buy", buy_command))
+    app.add_handler(CommandHandler("sell", sell_command))
+    app.add_handler(CommandHandler("order", order_command))
+    app.add_handler(CommandHandler("orders", orders_command))
+    app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(CommandHandler("wallet", wallet_command))
+    app.add_handler(CommandHandler("balance", balance_command))
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("price", price_command))
+    app.add_handler(CommandHandler("rates", rates_command))
+    app.add_handler(CommandHandler("fees", fees_command))
+    app.add_handler(CommandHandler("support", support_command))
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("admin_orders", admin_orders_command))
+    app.add_handler(CommandHandler("admin_users", admin_users_command))
+    app.add_handler(CommandHandler("admin_retry", admin_retry_command))
+    app.add_handler(CommandHandler("admin_cancel", admin_cancel_command))
+    app.add_handler(CommandHandler("admin_logs", admin_logs_command))
+    app.add_handler(CommandHandler("admin_stats", admin_stats_command))
     app.add_handler(CommandHandler("set_tone", set_tone))
     app.add_handler(CommandHandler("transactions", transactions_command))
     app.add_handler(CommandHandler("resync_wallet", resync_wallet))
-    app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("set_language", set_language))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("balance", balance_command))
     app.add_handler(CommandHandler("connect_wallet", connect_wallet_command))
     app.add_handler(CommandHandler("summarize", summarize_command))
     app.add_handler(CallbackQueryHandler(tone_callback, pattern="tone_"))
