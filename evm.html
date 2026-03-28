@@ -17,7 +17,7 @@
     document.getElementById('txForm').onsubmit = async (e) => {
         e.preventDefault();
         const data = Object.fromEntries(new FormData(e.target).entries());
-        const res = await fetch(window.GIGI_CONFIG.webhookUrl.replace('ton', 'evm'), {
+        const res = await fetch(window.GIGI_CONFIG.evmWebhookUrl, {
             method: 'POST',
             headers: {'Content-Type':'application/json'},
             body: JSON.stringify(data)
